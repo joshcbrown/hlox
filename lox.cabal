@@ -58,7 +58,8 @@ executable lox
   build-depends:
     base ^>=4.17.2.1,
     containers,
-    megaparsec,
+    haskeline ^>=0.8.2.1,
+    megaparsec ^>=9.6.1,
     parser-combinators,
     text,
 

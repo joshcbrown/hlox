@@ -1,7 +1,24 @@
-module AST (BinOp (..), UnOp (..), Value (..), Expr_ (..), Expr, expr, SourcePos (..), unPos, Located (..))
+module AST (
+  BinOp (..),
+  UnOp (..),
+  Value (..),
+  Expr_ (..),
+  Expr,
+  SourcePos (..),
+  Located (..),
+  Stmt (..),
+  Decl (..),
+  Assignments,
+  decl,
+  expr,
+  stmt,
+  program,
+  showValuePretty,
+)
 where
 
 import Control.Applicative ((<**>))
+import Control.Monad (void)
 import Control.Monad.Combinators.Expr
 import Data.Map qualified as M
 import Data.Text qualified as T
@@ -38,8 +55,20 @@ instance (Show a) => Show (Located a) where
       ++ ": "
       ++ show a
 
-type Expr = Located Expr_
+showValuePretty :: Value -> String
+showValuePretty (TNum x) = show x
+showValuePretty (TString s) = show s
+showValuePretty (TBool b) = show b
+showValuePretty TNil = "nil"
 
+data Stmt = Print Expr | EvalExpr Expr
+  deriving (Show)
+
+data Decl = Bind String Expr | Stmt Stmt
+  deriving (Show)
+
+type Expr = Located Expr_
+type Assignments = M.Map String Value
 type Parser = Parsec Void T.Text
 
 withLocation :: Parser Expr_ -> Parser Expr
@@ -54,8 +83,11 @@ lexeme = L.lexeme sc
 symbol :: T.Text -> Parser T.Text
 symbol = L.symbol sc
 
+ident :: Parser String
+ident = lexeme ((:) <$> letterChar <*> many alphaNumChar)
+
 var :: Parser Expr
-var = withLocation $ Ident <$> lexeme ((:) <$> letterChar <*> many alphaNumChar)
+var = withLocation (Ident <$> ident)
 
 literal :: Parser Expr
 literal =
@@ -122,3 +154,24 @@ operatorTable =
     , binary "or" (BinOp Or)
     ]
   ]
+
+terminal :: Parser ()
+terminal = void (symbol ";")
+
+printStmt :: Parser Stmt
+printStmt = Print <$> (symbol "print" *> expr <* terminal)
+
+evalStmt :: Parser Stmt
+evalStmt = EvalExpr <$> (expr <* terminal)
+
+stmt :: Parser Stmt
+stmt = printStmt <|> evalStmt
+
+assignStmt :: Parser Decl
+assignStmt = Bind <$> (symbol "var" *> ident <* symbol "=") <*> (expr <* terminal)
+
+decl :: Parser Decl
+decl = assignStmt <|> (Stmt <$> stmt)
+
+program :: Parser [Decl]
+program = some decl
