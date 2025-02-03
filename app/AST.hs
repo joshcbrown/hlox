@@ -21,6 +21,7 @@ import Control.Applicative ((<**>))
 import Control.Monad (void)
 import Control.Monad.Combinators.Expr
 import Data.Map qualified as M
+import Data.Maybe (fromMaybe)
 import Data.Text qualified as T
 import Data.Void (Void)
 import Text.Megaparsec
@@ -168,7 +169,13 @@ stmt :: Parser Stmt
 stmt = printStmt <|> evalStmt
 
 assignStmt :: Parser Decl
-assignStmt = Bind <$> (symbol "var" *> ident <* symbol "=") <*> (expr <* terminal)
+assignStmt = do
+  void $ symbol "var"
+  name <- ident
+  l <- getSourcePos
+  e <- optional (symbol "=" *> expr)
+  void terminal
+  return $ Bind name (fromMaybe (Located l (Value TNil)) e)
 
 decl :: Parser Decl
 decl = assignStmt <|> (Stmt <$> stmt)
