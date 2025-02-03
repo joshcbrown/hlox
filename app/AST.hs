@@ -1,4 +1,4 @@
-module AST (BinOp (..), UnOp (..), Value (..), Expr_ (..), Expr, expr, SourcePos (..))
+module AST (BinOp (..), UnOp (..), Value (..), Expr_ (..), Expr, expr, SourcePos (..), unPos, Located (..))
 where
 
 import Control.Applicative ((<**>))
@@ -16,19 +16,34 @@ data UnOp = Negate | Not
   deriving (Show)
 data Value = TNum Double | TString String | TBool Bool | TNil
   deriving (Show)
-data Expr_ a
-  = Ident String a
-  | Value Value a
-  | UnOp UnOp Expr a
-  | BinOp BinOp Expr Expr a
+data Expr_
+  = Ident String
+  | Value Value
+  | UnOp UnOp Expr
+  | BinOp BinOp Expr Expr
   deriving (Show)
 
-type Expr = Expr_ SourcePos
+data Located a = Located
+  { location :: SourcePos
+  , unLocate :: a
+  }
+  deriving (Functor)
+
+instance (Show a) => Show (Located a) where
+  show (Located l a) =
+    "line "
+      ++ (show . unPos . sourceLine $ l)
+      ++ " col "
+      ++ (show . unPos . sourceColumn $ l)
+      ++ ": "
+      ++ show a
+
+type Expr = Located Expr_
 
 type Parser = Parsec Void T.Text
 
-withLocation :: Parser (SourcePos -> Expr) -> Parser Expr
-withLocation p = getSourcePos <**> p
+withLocation :: Parser Expr_ -> Parser Expr
+withLocation p = Located <$> getSourcePos <*> p
 
 sc :: Parser ()
 sc = L.space space1 (L.skipLineComment "//") (L.skipBlockComment "/*" "*/")
@@ -62,14 +77,15 @@ atom = choice [parens expr, literal, var]
 expr :: Parser Expr
 expr = makeExprParser atom operatorTable
 
-binary :: T.Text -> (Expr -> Expr -> SourcePos -> Expr) -> Operator Parser Expr
-binary name f = InfixL (flip3 f <$> (getSourcePos <* symbol name))
+binary :: T.Text -> (Expr -> Expr -> Expr_) -> Operator Parser Expr
+binary name f = InfixL $ do
+  l <- getSourcePos <* symbol name
+  return $ \e1 e2 -> Located l (f e1 e2)
 
-prefix :: T.Text -> (Expr -> SourcePos -> Expr) -> Operator Parser Expr
-prefix name f = Prefix (flip f <$> (getSourcePos <* symbol name))
-
-flip3 :: (a -> b -> c -> d) -> c -> a -> b -> d
-flip3 f c a b = f a b c
+prefix :: T.Text -> (Expr -> Expr_) -> Operator Parser Expr
+prefix name f = Prefix $ do
+  l <- getSourcePos <* symbol name
+  return $ \e -> Located l (f e)
 
 -- decreasing precedence
 -- there is a tradeoff here with the library where multiple occurences of
@@ -82,7 +98,6 @@ operatorTable =
   ,
     [ prefix "-" (UnOp Negate)
     , prefix "!" (UnOp Not)
-    , prefix "+" const
     ]
   ,
     [ binary "*" (BinOp Mul)
