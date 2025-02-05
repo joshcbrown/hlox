@@ -48,13 +48,7 @@ data Located a = Located
   deriving (Functor)
 
 instance (Show a) => Show (Located a) where
-  show (Located l a) =
-    "line "
-      ++ (show . unPos . sourceLine $ l)
-      ++ " col "
-      ++ (show . unPos . sourceColumn $ l)
-      ++ ": "
-      ++ show a
+  show (Located l a) = "(" ++ sourcePosPretty l ++ " " ++ show a ++ ")"
 
 showValuePretty :: Value -> String
 showValuePretty (TNum x) = show x
