@@ -41,20 +41,20 @@ data StmtAction = NoAction | Assign String Value
   deriving (Show)
 type StmtResult = Either ExprError StmtAction
 
-evalExpr :: Expr -> Assignments -> Either ExprError Value
-evalExpr (Located l e) env =
+evalExpr :: (?env :: Assignments) => Expr -> Either ExprError Value
+evalExpr (Located l e) =
   case e of
     Value v -> Right v
     UnOp op e1 ->
-      evalExpr e1 env
+      evalExpr e1
         >>= case op of
           Negate -> neg
           Not -> not'
     BinOp op e1 e2 -> do
-      v1 <- evalExpr e1 env
-      v2 <- evalExpr e2 env
+      v1 <- evalExpr e1
+      v2 <- evalExpr e2
       operator op v1 v2
-    Ident i -> case M.lookup i env of
+    Ident i -> case M.lookup i ?env of
       Just v -> Right v
       Nothing -> Left . Located l $ NotInScope i
  where
@@ -94,21 +94,21 @@ evalExpr (Located l e) env =
     Neq -> neq''
     Dot -> \_ _ -> Left $ Located l $ NotSupportedError ". operator"
 
-evalStmt :: Stmt -> Assignments -> IO StmtResult
-evalStmt (Print e) env =
-  let evalRes = evalExpr e env
+evalStmt :: (?env :: Assignments) => Stmt -> IO StmtResult
+evalStmt (Print e) =
+  let evalRes = evalExpr e
    in case evalRes of
         Left err -> print e $> Left err
         Right v -> putStrLn (showValuePretty v) $> Right NoAction
-evalStmt (EvalExpr e) env = return (NoAction <$ evalExpr e env)
+evalStmt (EvalExpr e) = return (NoAction <$ evalExpr e)
 
-evalDecl :: Decl -> Assignments -> IO StmtResult
-evalDecl (Bind i e) env =
-  let evalRes = evalExpr e env
+evalDecl :: (?env :: Assignments) => Decl -> IO StmtResult
+evalDecl (Bind i e) =
+  let evalRes = evalExpr e
    in case evalRes of
         Left err -> return $ Left err
         Right v -> return . Right $ Assign i v
-evalDecl (Stmt s) env = evalStmt s env
+evalDecl (Stmt s) = evalStmt s
 
 expectNum :: (Double -> a) -> SourcePos -> Value -> Either ExprError a
 expectNum f _ (TNum x) = return $ f x

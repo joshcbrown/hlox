@@ -19,7 +19,7 @@ loop env = do
       case parseResult of
         Left err -> outputStrLn (errorBundlePretty err) *> loop env
         Right statement -> do
-          res <- liftIO $ evalDecl statement env
+          res <- liftIO $ let ?env = env in evalDecl statement
           case res of
             Left e -> outputStrLn (show e) *> loop env
             Right action -> loop (updateEnv action env)
