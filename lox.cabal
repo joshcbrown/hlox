@@ -56,6 +56,7 @@ executable lox
   default-extensions:
     ImplicitParams
     OverloadedStrings
+    LambdaCase
 
   -- Other library packages from which modules are imported.
   build-depends:
@@ -63,8 +64,10 @@ executable lox
     containers,
     haskeline ^>=0.8.2.1,
     megaparsec ^>=9.6.1,
+    mtl,
     parser-combinators,
     text,
+    transformers,
 
   -- Directories containing source files.
   hs-source-dirs: app

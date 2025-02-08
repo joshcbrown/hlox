@@ -4,7 +4,7 @@ import AST (Assignments, decl)
 import Control.Monad.IO.Class (liftIO)
 import Data.Map qualified as M
 import Data.Text qualified as T
-import Eval (StmtAction (..), evalDecl, evalStmt)
+import Eval (StmtAction (..), evalDecl, evalStmt, runEvaluation)
 import System.Console.Haskeline
 import Text.Megaparsec (eof, errorBundlePretty, runParser)
 
@@ -19,10 +19,11 @@ loop env = do
       case parseResult of
         Left err -> outputStrLn (errorBundlePretty err) *> loop env
         Right statement -> do
-          res <- liftIO $ let ?env = env in evalDecl statement
+          let evaluation = evalDecl statement
+          res <- liftIO (runEvaluation evaluation env)
           case res of
             Left e -> outputStrLn (show e) *> loop env
-            Right action -> loop (updateEnv action env)
+            Right ((), env') -> loop env'
 
 updateEnv :: StmtAction -> Assignments -> Assignments
 updateEnv (Assign s v) = M.insert s v
