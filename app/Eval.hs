@@ -1,5 +1,4 @@
 {-# LANGUAGE DerivingStrategies #-}
-{-# LANGUAGE LambdaCase #-}
 
 module Eval where
 
@@ -73,6 +72,10 @@ evalExpr (Located l e) =
       case M.lookup ident env of
         Just v -> pure v
         Nothing -> throwError $ Located l $ NotInScope ident
+    Assgn i e1 -> do
+      v <- evalExpr e1
+      modify (M.insert i v)
+      pure v
  where
   neg v = TNum <$> expectNum negate l v
   not' v = TBool <$> expectBool not l v

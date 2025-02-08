@@ -37,6 +37,7 @@ data Value = TNum Double | TString String | TBool Bool | TNil
 data Expr_
   = Ident String
   | Value Value
+  | Assgn String Expr
   | UnOp UnOp Expr
   | BinOp BinOp Expr Expr
   deriving (Show)
@@ -81,9 +82,6 @@ symbol = L.symbol sc
 ident :: Parser String
 ident = lexeme ((:) <$> letterChar <*> many alphaNumChar)
 
-var :: Parser Expr
-var = withLocation (Ident <$> ident)
-
 literal :: Parser Expr
 literal =
   withLocation $
@@ -98,8 +96,17 @@ literal =
 parens :: Parser a -> Parser a
 parens = between (symbol "(") (symbol ")")
 
+assgn :: Parser Expr
+assgn = do
+  loc <- getSourcePos
+  lval <- ident
+  rhs <- optional (symbol "=" *> expr)
+  return $ case rhs of
+    Nothing -> Located loc $ Ident lval
+    Just e -> Located loc $ Assgn lval e
+
 atom :: Parser Expr
-atom = choice [parens expr, literal, var]
+atom = choice [parens expr, literal, assgn]
 
 expr :: Parser Expr
 expr = makeExprParser atom operatorTable
