@@ -20,7 +20,7 @@ import Control.Monad (void)
 import Control.Monad.Error.Class
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Control.Monad.RWS.Class (MonadState)
-import Control.Monad.State (get, modify)
+import Control.Monad.State (evalStateT, get, modify)
 import Data.Foldable (traverse_)
 import Data.Map qualified as M
 import Error (ExprError_ (..), LoxError, exprError)
@@ -94,6 +94,7 @@ evalDecl :: (MonadState Assignments m, MonadError LoxError m, MonadIO m) => Decl
 evalDecl (Bind i e) = do
   v <- evalExpr e
   modify (M.insert i v)
+evalDecl (Scope program) = get >>= evalStateT (evalProgram program)
 evalDecl (Stmt s) = evalStmt s
 
 evalProgram :: (MonadState Assignments m, MonadError LoxError m, MonadIO m) => Program -> m ()

@@ -61,7 +61,7 @@ showValuePretty TNil = "nil"
 data Stmt = Print Expr | EvalExpr Expr
   deriving (Show)
 
-data Decl = Bind String Expr | Stmt Stmt
+data Decl = Bind String Expr | Scope [Decl] | Stmt Stmt
   deriving (Show)
 
 type Expr = Located Expr_
@@ -180,8 +180,11 @@ assignStmt = do
   void terminal
   return $ Bind name (fromMaybe (Located l (Value TNil)) e)
 
+scope :: Parser Decl
+scope = symbol "{" *> (Scope <$> program) <* symbol "}"
+
 decl :: Parser Decl
-decl = assignStmt <|> (Stmt <$> stmt)
+decl = assignStmt <|> scope <|> (Stmt <$> stmt)
 
 program :: Parser [Decl]
 program = some decl
