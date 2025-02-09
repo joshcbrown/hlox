@@ -1,33 +1,41 @@
 module Main where
 
-import AST (Assignments, decl)
-import Control.Monad.IO.Class (liftIO)
-import Data.Map qualified as M
+import AST (Assignments)
+import Control.Monad.Catch (MonadMask)
+import Control.Monad.Except (MonadError (..), runExceptT)
+import Control.Monad.IO.Class (MonadIO, liftIO)
+import Control.Monad.State (MonadState, MonadTrans (lift), evalStateT)
 import Data.Text qualified as T
-import Eval (StmtAction (..), evalDecl, evalStmt, runEvaluation)
+import Error (LoxError, runLoxParser)
+import Eval (evalProgram)
 import System.Console.Haskeline
-import Text.Megaparsec (eof, errorBundlePretty, runParser)
 
--- TODO: make a unified error type so that this nested case shit can be squished
-loop :: Assignments -> InputT IO ()
-loop env = do
-  line <- getInputLine "lox> "
-  case line of
-    Nothing -> loop env
-    Just s -> do
-      let parseResult = runParser (decl <* eof) "" (T.pack s)
-      case parseResult of
-        Left err -> outputStrLn (errorBundlePretty err) *> loop env
-        Right statement -> do
-          let evaluation = evalDecl statement
-          res <- liftIO (runEvaluation evaluation env)
-          case res of
-            Left e -> outputStrLn (show e) *> loop env
-            Right ((), env') -> loop env'
+runRepl :: IO ()
+runRepl = evalStateT (runInputT settings repl) initialState
+ where
+  initialState = mempty :: Assignments
+  settings =
+    defaultSettings
+      { historyFile = Just ".lox_history"
+      }
 
-updateEnv :: StmtAction -> Assignments -> Assignments
-updateEnv (Assign s v) = M.insert s v
-updateEnv _ = id
+repl :: (MonadState Assignments m, MonadIO m, MonadMask m) => InputT m ()
+repl = do
+  minput <- getInputLine "lox> "
+  case minput of
+    Nothing -> return ()
+    Just "exit" -> return ()
+    Just input -> do
+      res <- lift $ runExceptT (processLine (T.pack input))
+      case res of
+        Left e -> liftIO $ print e
+        _ -> pure ()
+      repl
+
+processLine :: (MonadState Assignments m, MonadError LoxError m, MonadIO m) => T.Text -> m ()
+processLine input = do
+  program <- either throwError return $ runLoxParser "" input
+  evalProgram program
 
 main :: IO ()
-main = runInputT defaultSettings (loop M.empty)
+main = runRepl

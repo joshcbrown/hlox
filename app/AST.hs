@@ -9,6 +9,7 @@ module AST (
   Stmt (..),
   Decl (..),
   Assignments,
+  Program,
   decl,
   expr,
   stmt,
@@ -66,6 +67,7 @@ data Decl = Bind String Expr | Stmt Stmt
 type Expr = Located Expr_
 type Assignments = M.Map String Value
 type Parser = Parsec Void T.Text
+type Program = [Decl]
 
 withLocation :: Parser Expr_ -> Parser Expr
 withLocation p = Located <$> getSourcePos <*> p

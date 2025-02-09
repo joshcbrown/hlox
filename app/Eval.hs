@@ -9,6 +9,7 @@ import AST (
   Expr,
   Expr_ (..),
   Located (..),
+  Program,
   SourcePos (..),
   Stmt (..),
   UnOp (..),
@@ -19,42 +20,12 @@ import Control.Monad (void)
 import Control.Monad.Error.Class
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Control.Monad.RWS.Class (MonadState)
-import Control.Monad.State (StateT, get, modify, runStateT)
-import Control.Monad.Trans.Except (ExceptT, runExceptT)
+import Control.Monad.State (get, modify)
+import Data.Foldable (traverse_)
 import Data.Map qualified as M
+import Error (ExprError_ (..), LoxError, exprError)
 
-data ExprError_
-  = TypeError
-      { -- think this needs to be stringly typed because eventually well want
-        -- support for user defined classes
-        expected :: String
-      , got :: Value
-      }
-  | DivideByZero
-  | NotInScope
-      {var :: String}
-  | NotSupportedError
-      {unsupported :: String}
-instance Show ExprError_ where
-  show (TypeError expected got) = "expected " ++ expected ++ ", got " ++ show got
-  show DivideByZero = "divide by zero"
-  show (NotSupportedError op) = op ++ " not supported"
-  show (NotInScope ident) = "variable " ++ ident ++ " does not exist"
-
-type ExprError = Located ExprError_
-
-data StmtAction = NoAction | Assign String Value
-  deriving (Show)
-type StmtResult = Either ExprError StmtAction
-
--- TODO: define effect for printing, use instead of MonadIO
-newtype Evaluation env err a = Evaluation (StateT env (ExceptT err IO) a)
-  deriving newtype (Functor, Applicative, Monad, MonadState env, MonadError err, MonadIO)
-
-runEvaluation :: Evaluation env err a -> env -> IO (Either err (a, env))
-runEvaluation (Evaluation m) initialEnv = runExceptT (runStateT m initialEnv)
-
-evalExpr :: (MonadState Assignments m, MonadError ExprError m) => Expr -> m Value
+evalExpr :: (MonadState Assignments m, MonadError LoxError m) => Expr -> m Value
 evalExpr (Located l e) =
   case e of
     Value v -> pure v
@@ -71,7 +42,7 @@ evalExpr (Located l e) =
       env <- get
       case M.lookup ident env of
         Just v -> pure v
-        Nothing -> throwError $ Located l $ NotInScope ident
+        Nothing -> throwError . exprError l $ NotInScope ident
     Assgn i e1 -> do
       v <- evalExpr e1
       modify (M.insert i v)
@@ -95,7 +66,7 @@ evalExpr (Located l e) =
     x' <- expectNum id l x
     y' <- expectNum id l y
     if y' == 0.0
-      then throwError . Located l $ DivideByZero
+      then throwError . exprError l $ DivideByZero
       else pure . TNum $ x' / y'
 
   operator op = case op of
@@ -111,32 +82,35 @@ evalExpr (Located l e) =
     And -> bopB (&&) TBool
     Eq -> eq'
     Neq -> neq'
-    Dot -> \_ _ -> throwError $ Located l $ NotSupportedError ". operator"
+    Dot -> \_ _ -> throwError . exprError l $ NotSupportedError ". operator"
 
-evalStmt :: (MonadState Assignments m, MonadError ExprError m, MonadIO m) => Stmt -> m ()
+evalStmt :: (MonadState Assignments m, MonadError LoxError m, MonadIO m) => Stmt -> m ()
 evalStmt (Print e) = do
   v <- evalExpr e
   liftIO $ putStrLn (showValuePretty v)
 evalStmt (EvalExpr e) = void $ evalExpr e
 
-evalDecl :: (MonadState Assignments m, MonadError ExprError m, MonadIO m) => Decl -> m ()
+evalDecl :: (MonadState Assignments m, MonadError LoxError m, MonadIO m) => Decl -> m ()
 evalDecl (Bind i e) = do
   v <- evalExpr e
   modify (M.insert i v)
 evalDecl (Stmt s) = evalStmt s
 
-expectNum :: (MonadError ExprError m) => (Double -> a) -> SourcePos -> Value -> m a
+evalProgram :: (MonadState Assignments m, MonadError LoxError m, MonadIO m) => Program -> m ()
+evalProgram = traverse_ evalDecl
+
+expectNum :: (MonadError LoxError m) => (Double -> a) -> SourcePos -> Value -> m a
 expectNum f _ (TNum x) = return $ f x
-expectNum _ l v = throwError $ Located l $ TypeError "num" v
+expectNum _ l v = throwError . exprError l $ TypeError "num" v
 
-expectBool :: (MonadError ExprError m) => (Bool -> a) -> SourcePos -> Value -> m a
+expectBool :: (MonadError LoxError m) => (Bool -> a) -> SourcePos -> Value -> m a
 expectBool f _ (TBool b) = return $ f b
-expectBool _ l v = throwError $ Located l $ TypeError "bool" v
+expectBool _ l v = throwError . exprError l $ TypeError "bool" v
 
-expectString :: (MonadError ExprError m) => (String -> a) -> SourcePos -> Value -> m a
+expectString :: (MonadError LoxError m) => (String -> a) -> SourcePos -> Value -> m a
 expectString f _ (TString s) = return $ f s
-expectString _ l v = throwError $ Located l $ TypeError "string" v
+expectString _ l v = throwError . exprError l $ TypeError "string" v
 
-expectNil :: (MonadError ExprError m) => a -> SourcePos -> Value -> m a
+expectNil :: (MonadError LoxError m) => a -> SourcePos -> Value -> m a
 expectNil a _ TNil = return a
-expectNil _ l v = throwError $ Located l $ TypeError "nil" v
+expectNil _ l v = throwError . exprError l $ TypeError "nil" v
