@@ -1,5 +1,3 @@
-{-# LANGUAGE DerivingStrategies #-}
-
 module Eval where
 
 import AST (
@@ -43,10 +41,14 @@ evalExpr (Located l e) =
       case M.lookup ident env of
         Just v -> pure v
         Nothing -> throwError . exprError l $ NotInScope ident
-    Assgn i e1 -> do
-      v <- evalExpr e1
-      modify (M.insert i v)
-      pure v
+    Assgn ident e1 -> do
+      env <- get
+      case M.lookup ident env of
+        Nothing -> throwError . exprError l $ NotInScope ident
+        Just _ -> do
+          v <- evalExpr e1
+          modify (M.insert ident v)
+          pure v
  where
   neg v = TNum <$> expectNum negate l v
   not' v = TBool <$> expectBool not l v
