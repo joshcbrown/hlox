@@ -8,7 +8,6 @@ module AST (
   Located (..),
   Stmt (..),
   Decl (..),
-  Assignments,
   Program,
   decl,
   expr,
@@ -65,7 +64,6 @@ data Decl = Bind String Expr | Scope [Decl] | Stmt Stmt
   deriving (Show)
 
 type Expr = Located Expr_
-type Assignments = M.Map String Value
 type Parser = Parsec Void T.Text
 type Program = [Decl]
 

@@ -1,7 +1,6 @@
 module Eval where
 
 import AST (
-  Assignments,
   BinOp (..),
   Decl (..),
   Expr,
@@ -18,12 +17,15 @@ import Control.Monad (void)
 import Control.Monad.Error.Class
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Control.Monad.RWS.Class (MonadState)
-import Control.Monad.State (evalStateT, get, modify)
+import Control.Monad.State (evalStateT, get, gets, modify, put)
 import Data.Foldable (traverse_)
+import Data.Functor (($>))
 import Data.Map qualified as M
+import Data.Maybe (fromJust)
+import Environment (Env, assign, declare, enclosing, find, newScope)
 import Error (ExprError_ (..), LoxError, exprError)
 
-evalExpr :: (MonadState Assignments m, MonadError LoxError m) => Expr -> m Value
+evalExpr :: (MonadState Env m, MonadError LoxError m) => Expr -> m Value
 evalExpr (Located l e) =
   case e of
     Value v -> pure v
@@ -37,18 +39,16 @@ evalExpr (Located l e) =
       v2 <- evalExpr e2
       operator op v1 v2
     Ident ident -> do
-      env <- get
-      case M.lookup ident env of
+      res <- gets (find ident)
+      case res of
         Just v -> pure v
         Nothing -> throwError . exprError l $ NotInScope ident
     Assgn ident e1 -> do
-      env <- get
-      case M.lookup ident env of
+      v <- evalExpr e1
+      res <- gets (assign ident v)
+      case res of
         Nothing -> throwError . exprError l $ NotInScope ident
-        Just _ -> do
-          v <- evalExpr e1
-          modify (M.insert ident v)
-          pure v
+        Just newEnv -> put newEnv $> v
  where
   neg v = TNum <$> expectNum negate l v
   not' v = TBool <$> expectBool not l v
@@ -86,20 +86,25 @@ evalExpr (Located l e) =
     Neq -> neq'
     Dot -> \_ _ -> throwError . exprError l $ NotSupportedError ". operator"
 
-evalStmt :: (MonadState Assignments m, MonadError LoxError m, MonadIO m) => Stmt -> m ()
+evalStmt :: (MonadState Env m, MonadError LoxError m, MonadIO m) => Stmt -> m ()
 evalStmt (Print e) = do
   v <- evalExpr e
   liftIO $ putStrLn (showValuePretty v)
 evalStmt (EvalExpr e) = void $ evalExpr e
 
-evalDecl :: (MonadState Assignments m, MonadError LoxError m, MonadIO m) => Decl -> m ()
+evalDecl :: (MonadState Env m, MonadError LoxError m, MonadIO m) => Decl -> m ()
 evalDecl (Bind i e) = do
   v <- evalExpr e
-  modify (M.insert i v)
-evalDecl (Scope program) = get >>= evalStateT (evalProgram program)
+  modify (declare i v)
+evalDecl (Scope program) = do
+  modify newScope
+  evalProgram program
+  -- ok to use fromJust here because if enclosing returns `Nothing`,
+  -- there's a bug in the evaluation somewhere
+  modify (fromJust . enclosing)
 evalDecl (Stmt s) = evalStmt s
 
-evalProgram :: (MonadState Assignments m, MonadError LoxError m, MonadIO m) => Program -> m ()
+evalProgram :: (MonadState Env m, MonadError LoxError m, MonadIO m) => Program -> m ()
 evalProgram = traverse_ evalDecl
 
 expectNum :: (MonadError LoxError m) => (Double -> a) -> SourcePos -> Value -> m a
