@@ -105,13 +105,18 @@ evalDecl (Scope program) = do
 evalDecl (Stmt s) = evalStmt s
 evalDecl (If e block1 block2) = do
   -- TODO: fix, need to give decls location
-  b <- evalExpr e >>= expectBool id (SourcePos "" (mkPos 0) (mkPos 0))
+  b <- expectBool id (SourcePos "" (mkPos 0) (mkPos 0)) =<< evalExpr e
   if b
     then evalProgram block1
     else for_ block2 evalProgram
 evalDecl loop@(While e block) = do
-  b <- evalExpr e >>= expectBool id (SourcePos "" (mkPos 0) (mkPos 0))
+  b <- expectBool id (SourcePos "" (mkPos 0) (mkPos 0)) =<< evalExpr e
   when b $ evalProgram block *> evalDecl loop
+evalDecl (For pre cond post block) = evalExpr pre *> innerFor
+ where
+  innerFor = do
+    b <- expectBool id (SourcePos "" (mkPos 0) (mkPos 0)) =<< evalExpr cond
+    when b $ evalProgram block *> evalExpr post *> innerFor
 
 evalProgram :: (MonadState Env m, MonadError LoxError m, MonadIO m) => Program -> m ()
 evalProgram = traverse_ evalDecl

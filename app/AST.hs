@@ -67,6 +67,7 @@ data Decl
   | Stmt Stmt
   | If Expr [Decl] (Maybe [Decl])
   | While Expr [Decl]
+  | For Expr Expr Expr [Decl]
   deriving (Show)
 
 type Expr = Located Expr_
@@ -85,6 +86,9 @@ lexeme = L.lexeme sc
 symbol :: T.Text -> Parser T.Text
 symbol = L.symbol sc
 
+keyword :: T.Text -> Parser T.Text
+keyword word = lexeme . try $ string word <* notFollowedBy alphaNumChar
+
 ident :: Parser String
 ident = lexeme ((:) <$> letterChar <*> many alphaNumChar)
 
@@ -94,9 +98,9 @@ literal =
     choice
       [ Value . TNum <$> lexeme (try L.float <|> L.decimal)
       , Value . TString <$> lexeme (char '\"' *> manyTill L.charLiteral (char '\"'))
-      , Value (TBool True) <$ symbol "true"
-      , Value (TBool False) <$ symbol "false"
-      , Value TNil <$ symbol "nil"
+      , Value (TBool True) <$ keyword "true"
+      , Value (TBool False) <$ keyword "false"
+      , Value TNil <$ keyword "nil"
       ]
 
 parens :: Parser a -> Parser a
@@ -171,7 +175,7 @@ terminal :: Parser ()
 terminal = void (symbol ";")
 
 printStmt :: Parser Stmt
-printStmt = Print <$> (symbol "print" *> expr <* terminal)
+printStmt = Print <$> (keyword "print" *> expr <* terminal)
 
 evalStmt :: Parser Stmt
 evalStmt = EvalExpr <$> (expr <* terminal)
@@ -181,7 +185,7 @@ stmt = printStmt <|> evalStmt
 
 assignStmt :: Parser Decl
 assignStmt = do
-  void $ symbol "var"
+  void $ keyword "var"
   name <- ident
   l <- getSourcePos
   e <- optional (symbol "=" *> expr)
@@ -200,18 +204,26 @@ condition = symbol "(" *> expr <* symbol ")"
 ifStmt :: Parser Decl
 ifStmt =
   If
-    <$> (symbol "if" *> condition)
-    <*> (scope_ <* symbol "else")
+    <$> (keyword "if" *> condition)
+    <*> (scope_ <* keyword "else")
     <*> optional scope_
 
 whileStmt :: Parser Decl
 whileStmt =
   While
-    <$> (symbol "while" *> condition)
+    <$> (keyword "while" *> condition)
+    <*> scope_
+
+forStmt :: Parser Decl
+forStmt =
+  For
+    <$> (keyword "for" *> symbol "(" *> expr)
+    <*> (symbol ";" *> expr)
+    <*> (symbol ";" *> expr <* symbol ")")
     <*> scope_
 
 decl :: Parser Decl
-decl = assignStmt <|> scope <|> ifStmt <|> whileStmt <|> (Stmt <$> stmt)
+decl = assignStmt <|> scope <|> ifStmt <|> whileStmt <|> forStmt <|> (Stmt <$> stmt)
 
 program :: Parser [Decl]
 program = some decl
