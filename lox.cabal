@@ -53,6 +53,7 @@ executable lox
     Environment
     Error
     Eval
+    Opts
 
   -- LANGUAGE extensions used by modules in this package.
   default-extensions:
@@ -68,6 +69,7 @@ executable lox
     haskeline ^>=0.8.2.1,
     megaparsec ^>=9.6.1,
     mtl,
+    optparse-applicative ^>=0.18.1.0,
     parser-combinators,
     text,
     transformers,

@@ -8,6 +8,7 @@ import Data.Text qualified as T
 import Environment (Env, empty)
 import Error (LoxError, runLoxParser)
 import Eval (evalProgram)
+import Opts (ExecutionMode (..), executionMode, parseOptions)
 import System.Console.Haskeline
 
 runRepl :: IO ()
@@ -26,16 +27,28 @@ repl = do
     Nothing -> return ()
     Just "exit" -> return ()
     Just input -> do
-      res <- lift $ runExceptT (processLine (T.pack input))
+      res <- lift $ runExceptT (executeProgram (T.pack input))
       case res of
         Left e -> liftIO $ print e
         _ -> pure ()
       repl
 
-processLine :: (MonadState Env m, MonadError LoxError m, MonadIO m) => T.Text -> m ()
-processLine input = do
+executeProgram :: (MonadState Env m, MonadError LoxError m, MonadIO m) => T.Text -> m ()
+executeProgram input = do
   program <- either throwError pure $ runLoxParser "" input
   evalProgram program
 
+regular :: FilePath -> IO ()
+regular file = do
+  t <- T.pack <$> readFile file
+  res <- runExceptT (evalStateT (executeProgram t) empty)
+  case res of
+    Left e -> print e
+    Right () -> pure ()
+
 main :: IO ()
-main = runRepl
+main = do
+  opts <- parseOptions
+  case executionMode opts of
+    Repl -> runRepl
+    File file -> regular file
