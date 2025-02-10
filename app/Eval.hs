@@ -12,7 +12,7 @@ import AST (
   Value (..),
   showValuePretty,
  )
-import Control.Monad (void)
+import Control.Monad (void, when)
 import Control.Monad.Error.Class
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Control.Monad.RWS.Class (MonadState)
@@ -109,6 +109,9 @@ evalDecl (If e block1 block2) = do
   if b
     then evalProgram block1
     else for_ block2 evalProgram
+evalDecl loop@(While e block) = do
+  b <- evalExpr e >>= expectBool id (SourcePos "" (mkPos 0) (mkPos 0))
+  when b $ evalProgram block *> evalDecl loop
 
 evalProgram :: (MonadState Env m, MonadError LoxError m, MonadIO m) => Program -> m ()
 evalProgram = traverse_ evalDecl

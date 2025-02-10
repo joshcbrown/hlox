@@ -61,7 +61,12 @@ showValuePretty TNil = "nil"
 data Stmt = Print Expr | EvalExpr Expr
   deriving (Show)
 
-data Decl = Bind String Expr | Scope [Decl] | Stmt Stmt | If Expr [Decl] (Maybe [Decl])
+data Decl
+  = Bind String Expr
+  | Scope [Decl]
+  | Stmt Stmt
+  | If Expr [Decl] (Maybe [Decl])
+  | While Expr [Decl]
   deriving (Show)
 
 type Expr = Located Expr_
@@ -189,15 +194,24 @@ scope_ = symbol "{" *> program <* symbol "}"
 scope :: Parser Decl
 scope = Scope <$> scope_
 
+condition :: Parser Expr
+condition = symbol "(" *> expr <* symbol ")"
+
 ifStmt :: Parser Decl
 ifStmt =
   If
-    <$> (symbol "if" *> symbol "(" *> expr <* symbol ")")
+    <$> (symbol "if" *> condition)
     <*> (scope_ <* symbol "else")
     <*> optional scope_
 
+whileStmt :: Parser Decl
+whileStmt =
+  While
+    <$> (symbol "while" *> condition)
+    <*> scope_
+
 decl :: Parser Decl
-decl = assignStmt <|> scope <|> ifStmt <|> (Stmt <$> stmt)
+decl = assignStmt <|> scope <|> ifStmt <|> whileStmt <|> (Stmt <$> stmt)
 
 program :: Parser [Decl]
 program = some decl
