@@ -34,7 +34,7 @@ repl = do
 
 processLine :: (MonadState Env m, MonadError LoxError m, MonadIO m) => T.Text -> m ()
 processLine input = do
-  program <- either throwError return $ runLoxParser "" input
+  program <- either throwError pure $ runLoxParser "" input
   evalProgram program
 
 main :: IO ()
