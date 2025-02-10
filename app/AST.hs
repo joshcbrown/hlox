@@ -21,12 +21,13 @@ import Control.Applicative ((<**>))
 import Control.Monad (void)
 import Control.Monad.Combinators.Expr
 import Data.Map qualified as M
-import Data.Maybe (fromMaybe)
+import Data.Maybe (fromMaybe, isJust)
 import Data.Text qualified as T
 import Data.Void (Void)
 import Text.Megaparsec
 import Text.Megaparsec.Char
 import Text.Megaparsec.Char.Lexer qualified as L
+import Text.Megaparsec.Debug (dbg)
 
 data BinOp = Dot | Add | Sub | Mul | Div | Or | And | Eq | Neq | Lt | Leq | Gt | Geq
   deriving (Show)
@@ -60,7 +61,7 @@ showValuePretty TNil = "nil"
 data Stmt = Print Expr | EvalExpr Expr
   deriving (Show)
 
-data Decl = Bind String Expr | Scope [Decl] | Stmt Stmt
+data Decl = Bind String Expr | Scope [Decl] | Stmt Stmt | If Expr [Decl] (Maybe [Decl])
   deriving (Show)
 
 type Expr = Located Expr_
@@ -100,10 +101,14 @@ assgn :: Parser Expr
 assgn = do
   loc <- getSourcePos
   lval <- ident
-  rhs <- optional (symbol "=" *> expr)
-  return $ case rhs of
-    Nothing -> Located loc $ Ident lval
-    Just e -> Located loc $ Assgn lval e
+  equality <- isJust <$> optional (lookAhead (symbol "=="))
+  if equality
+    then pure $ Located loc $ Ident lval
+    else do
+      rhs <- optional (symbol "=" *> expr)
+      return $ case rhs of
+        Nothing -> Located loc $ Ident lval
+        Just e -> Located loc $ Assgn lval e
 
 atom :: Parser Expr
 atom = choice [parens expr, literal, assgn]
@@ -178,11 +183,21 @@ assignStmt = do
   void terminal
   return $ Bind name (fromMaybe (Located l (Value TNil)) e)
 
+scope_ :: Parser [Decl]
+scope_ = symbol "{" *> program <* symbol "}"
+
 scope :: Parser Decl
-scope = symbol "{" *> (Scope <$> program) <* symbol "}"
+scope = Scope <$> scope_
+
+ifStmt :: Parser Decl
+ifStmt =
+  If
+    <$> (symbol "if" *> symbol "(" *> expr <* symbol ")")
+    <*> (scope_ <* symbol "else")
+    <*> optional scope_
 
 decl :: Parser Decl
-decl = assignStmt <|> scope <|> (Stmt <$> stmt)
+decl = assignStmt <|> scope <|> ifStmt <|> (Stmt <$> stmt)
 
 program :: Parser [Decl]
 program = some decl

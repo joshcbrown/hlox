@@ -7,7 +7,6 @@ import AST (
   Expr_ (..),
   Located (..),
   Program,
-  SourcePos (..),
   Stmt (..),
   UnOp (..),
   Value (..),
@@ -18,12 +17,13 @@ import Control.Monad.Error.Class
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Control.Monad.RWS.Class (MonadState)
 import Control.Monad.State (evalStateT, get, gets, modify, put)
-import Data.Foldable (traverse_)
+import Data.Foldable (for_, traverse_)
 import Data.Functor (($>))
 import Data.Map qualified as M
 import Data.Maybe (fromJust)
 import Environment (Env, assign, declare, enclosing, find, newScope)
 import Error (ExprError_ (..), LoxError, exprError)
+import Text.Megaparsec.Pos
 
 evalExpr :: (MonadState Env m, MonadError LoxError m) => Expr -> m Value
 evalExpr (Located l e) =
@@ -103,6 +103,12 @@ evalDecl (Scope program) = do
   -- there's a bug in the evaluation somewhere
   modify (fromJust . enclosing)
 evalDecl (Stmt s) = evalStmt s
+evalDecl (If e block1 block2) = do
+  -- TODO: fix, need to give decls location
+  b <- evalExpr e >>= expectBool id (SourcePos "" (mkPos 0) (mkPos 0))
+  if b
+    then evalProgram block1
+    else for_ block2 evalProgram
 
 evalProgram :: (MonadState Env m, MonadError LoxError m, MonadIO m) => Program -> m ()
 evalProgram = traverse_ evalDecl
