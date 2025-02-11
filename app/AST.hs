@@ -127,12 +127,12 @@ expr = makeExprParser atom operatorTable
 
 binary :: T.Text -> (Expr -> Expr -> Expr_) -> Operator Parser Expr
 binary name f = InfixL $ do
-  l <- getSourcePos <* symbol name
+  l <- getSourcePos <* keyword name
   return $ \e1 e2 -> Located l (f e1 e2)
 
 prefix :: T.Text -> (Expr -> Expr_) -> Operator Parser Expr
 prefix name f = Prefix $ do
-  l <- getSourcePos <* symbol name
+  l <- getSourcePos <* keyword name
   return $ \e -> Located l (f e)
 
 -- decreasing precedence
@@ -205,8 +205,8 @@ ifStmt :: Parser Decl
 ifStmt =
   If
     <$> (keyword "if" *> condition)
-    <*> (scope_ <* keyword "else")
-    <*> optional scope_
+    <*> scope_
+    <*> optional (keyword "else" *> scope_)
 
 whileStmt :: Parser Decl
 whileStmt =

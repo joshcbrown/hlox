@@ -36,8 +36,23 @@ evalExpr (Located l e) =
           Not -> not'
     BinOp op e1 e2 -> do
       v1 <- evalExpr e1
-      v2 <- evalExpr e2
-      operator op v1 v2
+      case op of
+        -- manual short circuit
+        And -> do
+          b1 <- expectBool id (location e1) v1
+          if b1
+            then
+              TBool <$> (evalExpr e2 >>= expectBool id (location e2))
+            else pure (TBool False)
+        Or -> do
+          notB1 <- expectBool not (location e1) v1
+          if notB1
+            then
+              TBool <$> (evalExpr e2 >>= expectBool id (location e2))
+            else pure (TBool True)
+        _ -> do
+          v2 <- evalExpr e2
+          operator op v1 v2
     Ident ident -> do
       res <- gets (find ident)
       case res of
@@ -96,12 +111,7 @@ evalDecl :: (MonadState Env m, MonadError LoxError m, MonadIO m) => Decl -> m ()
 evalDecl (Bind i e) = do
   v <- evalExpr e
   modify (declare i v)
-evalDecl (Scope program) = do
-  modify newScope
-  evalProgram program
-  -- ok to use fromJust here because if enclosing returns `Nothing`,
-  -- there's a bug in the evaluation somewhere
-  modify (fromJust . enclosing)
+evalDecl (Scope program) = evalProgram program
 evalDecl (Stmt s) = evalStmt s
 evalDecl (If cond block1 block2) = do
   b <- evalCond cond
@@ -120,7 +130,7 @@ evalDecl (For pre cond post block) = evalExpr pre *> loop
     when b $ evalProgram block *> evalExpr post *> loop
 
 evalProgram :: (MonadState Env m, MonadError LoxError m, MonadIO m) => Program -> m ()
-evalProgram = traverse_ evalDecl
+evalProgram prog = modify newScope *> traverse_ evalDecl prog *> modify (fromJust . enclosing)
 
 evalCond :: (MonadError LoxError m, MonadState Env m) => Expr -> m Bool
 evalCond cond = expectBool id (location cond) =<< evalExpr cond
