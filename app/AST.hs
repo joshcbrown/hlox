@@ -67,7 +67,6 @@ data Decl
   | Stmt Stmt
   | If Expr [Decl] (Maybe [Decl])
   | While Expr [Decl]
-  | For Expr Expr Expr [Decl]
   deriving (Show)
 
 type Expr = Located Expr_
@@ -215,12 +214,12 @@ whileStmt =
     <*> scope_
 
 forStmt :: Parser Decl
-forStmt =
-  For
-    <$> (keyword "for" *> symbol "(" *> expr)
-    <*> (symbol ";" *> expr)
-    <*> (symbol ";" *> expr <* symbol ")")
-    <*> scope_
+forStmt = do
+  pre <- keyword "for" *> symbol "(" *> (assignStmt <|> (Stmt <$> evalStmt))
+  cond <- expr
+  post <- Stmt . EvalExpr <$> (symbol ";" *> expr <* symbol ")")
+  prog <- scope_
+  pure (Scope [pre, While cond (post : prog)])
 
 decl :: Parser Decl
 decl = assignStmt <|> scope <|> ifStmt <|> whileStmt <|> forStmt <|> (Stmt <$> stmt)

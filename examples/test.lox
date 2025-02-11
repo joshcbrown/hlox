@@ -1,6 +1,8 @@
-var a = 1;
-while (a < 1000000) {
+var a;
+for (var a = 0; a < 100000; a = a + 1) {
     print a;
     a = a + 1;
 }
+print a;
+
 

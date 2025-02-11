@@ -123,11 +123,6 @@ evalDecl (While cond block) = loop
   loop = do
     b <- evalCond cond
     when b $ evalProgram block *> loop
-evalDecl (For pre cond post block) = evalExpr pre *> loop
- where
-  loop = do
-    b <- evalCond cond
-    when b $ evalProgram block *> evalExpr post *> loop
 
 evalProgram :: (MonadState Env m, MonadError LoxError m, MonadIO m) => Program -> m ()
 evalProgram prog = modify newScope *> traverse_ evalDecl prog *> modify (fromJust . enclosing)
