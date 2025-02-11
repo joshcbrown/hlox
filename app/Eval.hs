@@ -103,25 +103,27 @@ evalDecl (Scope program) = do
   -- there's a bug in the evaluation somewhere
   modify (fromJust . enclosing)
 evalDecl (Stmt s) = evalStmt s
-evalDecl (If e block1 block2) = do
-  -- TODO: fix, need to give decls location
-  b <- expectBool id (SourcePos "" (mkPos 0) (mkPos 0)) =<< evalExpr e
+evalDecl (If cond block1 block2) = do
+  b <- evalCond cond
   if b
     then evalProgram block1
     else for_ block2 evalProgram
-evalDecl (While e block) = go
+evalDecl (While cond block) = loop
  where
-  go = do
-    b <- expectBool id (SourcePos "" (mkPos 0) (mkPos 0)) =<< evalExpr e
-    when b $ evalProgram block *> go
-evalDecl (For pre cond post block) = evalExpr pre *> innerFor
+  loop = do
+    b <- evalCond cond
+    when b $ evalProgram block *> loop
+evalDecl (For pre cond post block) = evalExpr pre *> loop
  where
-  innerFor = do
-    b <- expectBool id (SourcePos "" (mkPos 0) (mkPos 0)) =<< evalExpr cond
-    when b $ evalProgram block *> evalExpr post *> innerFor
+  loop = do
+    b <- evalCond cond
+    when b $ evalProgram block *> evalExpr post *> loop
 
 evalProgram :: (MonadState Env m, MonadError LoxError m, MonadIO m) => Program -> m ()
 evalProgram = traverse_ evalDecl
+
+evalCond :: (MonadError LoxError m, MonadState Env m) => Expr -> m Bool
+evalCond cond = expectBool id (location cond) =<< evalExpr cond
 
 expectNum :: (MonadError LoxError m) => (Double -> a) -> SourcePos -> Value -> m a
 expectNum f _ (TNum x) = return $ f x
