@@ -41,6 +41,7 @@ data Expr_
   | Assgn String Expr
   | UnOp UnOp Expr
   | BinOp BinOp Expr Expr
+  | Call Expr [Expr]
   deriving (Show)
 
 data Located a = Located
@@ -113,16 +114,33 @@ assgn = do
   if equality
     then pure $ Located loc $ Ident lval
     else do
-      rhs <- optional (symbol "=" *> expr)
+      rhs <- optional (symbol "=" *> expr_)
       return $ case rhs of
         Nothing -> Located loc $ Ident lval
         Just e -> Located loc $ Assgn lval e
 
 atom :: Parser Expr
-atom = choice [parens expr, literal, assgn]
+atom = choice [parens expr_, literal, assgn]
+
+expr_ :: Parser Expr
+expr_ = makeExprParser atom operatorTable
+
+args :: Parser [Expr]
+args = (:) <$> expr_ <*> many (symbol "," *> expr_)
 
 expr :: Parser Expr
-expr = makeExprParser atom operatorTable
+expr = do
+  e <- expr_
+  go e
+ where
+  go e = do
+    shouldCont <- isJust <$> optional (lookAhead (symbol "("))
+    if not shouldCont
+      then pure e
+      else do
+        void (symbol "(")
+        newE <- Located (location e) . Call e <$> (args <* symbol ")")
+        go newE
 
 binary :: T.Text -> (Expr -> Expr -> Expr_) -> Operator Parser Expr
 binary name f = InfixL $ do
@@ -174,10 +192,10 @@ terminal :: Parser ()
 terminal = void (symbol ";")
 
 printStmt :: Parser Stmt
-printStmt = Print <$> (keyword "print" *> expr <* terminal)
+printStmt = Print <$> (keyword "print" *> expr_ <* terminal)
 
 evalStmt :: Parser Stmt
-evalStmt = EvalExpr <$> (expr <* terminal)
+evalStmt = EvalExpr <$> (expr_ <* terminal)
 
 stmt :: Parser Stmt
 stmt = printStmt <|> evalStmt
@@ -187,7 +205,7 @@ assignStmt = do
   void $ keyword "var"
   name <- ident
   l <- getSourcePos
-  e <- optional (symbol "=" *> expr)
+  e <- optional (symbol "=" *> expr_)
   void terminal
   return $ Bind name (fromMaybe (Located l (Value TNil)) e)
 
@@ -198,7 +216,7 @@ scope :: Parser Decl
 scope = Scope <$> scope_
 
 condition :: Parser Expr
-condition = symbol "(" *> expr <* symbol ")"
+condition = symbol "(" *> expr_ <* symbol ")"
 
 ifStmt :: Parser Decl
 ifStmt =
@@ -216,8 +234,8 @@ whileStmt =
 forStmt :: Parser Decl
 forStmt = do
   pre <- keyword "for" *> symbol "(" *> (assignStmt <|> (Stmt <$> evalStmt))
-  cond <- expr
-  post <- Stmt . EvalExpr <$> (symbol ";" *> expr <* symbol ")")
+  cond <- expr_
+  post <- Stmt . EvalExpr <$> (symbol ";" *> expr_ <* symbol ")")
   prog <- scope_
   pure (Scope [pre, While cond (post : prog)])
 
