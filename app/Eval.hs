@@ -109,9 +109,11 @@ evalDecl (If e block1 block2) = do
   if b
     then evalProgram block1
     else for_ block2 evalProgram
-evalDecl loop@(While e block) = do
-  b <- expectBool id (SourcePos "" (mkPos 0) (mkPos 0)) =<< evalExpr e
-  when b $ evalProgram block *> evalDecl loop
+evalDecl (While e block) = go
+ where
+  go = do
+    b <- expectBool id (SourcePos "" (mkPos 0) (mkPos 0)) =<< evalExpr e
+    when b $ evalProgram block *> go
 evalDecl (For pre cond post block) = evalExpr pre *> innerFor
  where
   innerFor = do
