@@ -66,10 +66,13 @@ atom = choice [parens expr_, literal, assgn]
 expr_ :: Parser Expr
 expr_ = makeExprParser atom operatorTable
 
-args :: Parser [Expr]
-args = fromMaybe [] <$> optional parseArgs
+commaSeparated :: Parser a -> Parser [a]
+commaSeparated p = fromMaybe [] <$> optional parseP
  where
-  parseArgs = (:) <$> expr_ <*> many (symbol "," *> expr_)
+  parseP = (:) <$> p <*> many (symbol "," *> p)
+
+args :: Parser [Expr]
+args = commaSeparated expr
 
 expr :: Parser Expr
 expr = do
@@ -173,8 +176,28 @@ forStmt = do
   prog <- scope_
   pure (Scope [pre, While cond (post : prog)])
 
+params :: Parser [String]
+params = commaSeparated ident
+
+funStmt :: Parser Decl
+funStmt =
+  Fun
+    <$> (keyword "fun" *> ident <* symbol "(")
+    <*> params
+    <* symbol ")"
+    <*> scope_
+
 decl :: Parser Decl
-decl = assignStmt <|> scope <|> ifStmt <|> whileStmt <|> forStmt <|> (EvalExpr <$> expr)
+decl =
+  choice
+    [ assignStmt
+    , scope
+    , ifStmt
+    , whileStmt
+    , forStmt
+    , funStmt
+    , EvalExpr <$> (expr <* symbol ";")
+    ]
 
 program :: Parser [Decl]
 program = some decl

@@ -1,0 +1,6 @@
+fun foo(n) {
+    if (n > 1) { foo(n - 1); }
+    print(n);
+}
+
+foo(3);

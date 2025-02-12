@@ -121,6 +121,7 @@ evalDecl (While cond block) = loop
   loop = do
     b <- evalCond cond
     when b $ evalProgram block *> loop
+evalDecl (Fun name params body) = modify (declare name (TFunction name params body))
 
 evalRepl :: (MonadState Env m, MonadError LoxError m, MonadIO m) => Program -> m ()
 evalRepl = traverse_ evalDecl
@@ -147,6 +148,21 @@ expectNil :: (MonadError LoxError m) => a -> SourcePos -> Value -> m a
 expectNil a _ TNil = return a
 expectNil _ l v = throwError . exprError l $ TypeError "nil" v
 
-expectCallable :: (MonadError LoxError m, MonadIO m) => [Value] -> SourcePos -> Value -> m Value
+logState :: (MonadState Env m, MonadIO m) => String -> m ()
+logState state = do
+  s <- gets id
+  liftIO (putStrLn ("STATE " ++ state ++ "\n") *> print s *> putStrLn "\n\n")
+
+inNewScope :: (MonadState Env m, MonadError LoxError m, MonadIO m) => m a -> m a
+inNewScope m = modify newScope *> m <* modify (fromJust . enclosing)
+
+expectCallable :: (MonadError LoxError m, MonadState Env m, MonadIO m) => [Value] -> SourcePos -> Value -> m Value
 expectCallable args l (TNativeFunction f) = liftIO (f args l) >>= either throwError pure
+expectCallable args l (TFunction name params body) = do
+  if length args /= length params
+    then throwError . exprError l $ Arity name (length params) (length args)
+    else inNewScope $ do
+      traverse_ (\(ident, arg) -> modify (declare ident arg)) (zip params args)
+      evalRepl body
+      pure TNil
 expectCallable _ l v = throwError . exprError l $ TypeError "callable" v

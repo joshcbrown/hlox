@@ -1,7 +1,6 @@
 module LoxPrelude where
 
 import Data.Functor (($>))
-import Data.Int
 import Data.Map qualified as M
 import Data.Time.Clock.POSIX
 import Environment
@@ -9,7 +8,7 @@ import Types (ExprError_ (..), NativeFunction, Value (..), exprError, showValueP
 
 clock :: NativeFunction
 clock [] _ = do
-  Right . TNum . fromIntegral . round . (* 1000) <$> getPOSIXTime
+  Right . TNum . (fromIntegral @Int @Double) . round . (* 1000) <$> getPOSIXTime
 clock args l = pure (Left $ exprError l $ Arity "clock" 0 (length args))
 
 printy :: NativeFunction

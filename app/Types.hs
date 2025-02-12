@@ -29,18 +29,17 @@ data UnOp = Negate | Not
 
 type NativeFunction = [Value] -> SourcePos -> IO (Either LoxError Value)
 
+instance Show NativeFunction where
+  show _ = "<native function>"
+
 data Value
   = TNum Double
   | TString String
   | TBool Bool
   | TNil
   | TNativeFunction NativeFunction
-instance Show Value where
-  show (TNum x) = show x
-  show (TString s) = show s
-  show (TBool b) = show b
-  show TNil = "nil"
-  show (TNativeFunction _) = "<native function>"
+  | TFunction String [String] [Decl]
+  deriving (Show)
 
 data Expr_
   = Ident String
@@ -63,6 +62,7 @@ data Decl
   | EvalExpr Expr
   | If Expr [Decl] (Maybe [Decl])
   | While Expr [Decl]
+  | Fun String [String] [Decl]
   deriving (Show)
 
 type Expr = Located Expr_
