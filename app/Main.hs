@@ -5,16 +5,18 @@ import Control.Monad.Except (MonadError (..), runExceptT)
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Control.Monad.State (MonadState, MonadTrans (lift), evalStateT)
 import Data.Text qualified as T
-import Environment (Env, empty)
-import Error (LoxError, runLoxParser)
-import Eval (evalProgram)
+import Environment (Env)
+import Eval (evalProgram, evalRepl)
+import LoxPrelude (globalEnv)
 import Opts (ExecutionMode (..), executionMode, parseOptions)
+import Parse (runLoxParser)
 import System.Console.Haskeline
+import Types (LoxError)
 
 runRepl :: IO ()
 runRepl = evalStateT (runInputT settings repl) initialState
  where
-  initialState = empty
+  initialState = globalEnv
   settings =
     defaultSettings
       { historyFile = Just ".lox_history"
@@ -27,21 +29,22 @@ repl = do
     Nothing -> return ()
     Just "exit" -> return ()
     Just input -> do
-      res <- lift $ runExceptT (executeProgram (T.pack input))
+      res <- lift $ runExceptT (executeRepl (T.pack input))
       case res of
         Left e -> liftIO $ print e
         _ -> pure ()
       repl
 
+executeRepl :: (MonadState Env m, MonadError LoxError m, MonadIO m) => T.Text -> m ()
+executeRepl input = either throwError pure (runLoxParser "" input) >>= evalRepl
+
 executeProgram :: (MonadState Env m, MonadError LoxError m, MonadIO m) => T.Text -> m ()
-executeProgram input = do
-  program <- either throwError pure $ runLoxParser "" input
-  evalProgram program
+executeProgram input = either throwError pure (runLoxParser "" input) >>= evalProgram
 
 regular :: FilePath -> IO ()
 regular file = do
   t <- T.pack <$> readFile file
-  res <- runExceptT (evalStateT (executeProgram t) empty)
+  res <- runExceptT (evalStateT (executeProgram t) globalEnv)
   case res of
     Left e -> print e
     Right () -> pure ()

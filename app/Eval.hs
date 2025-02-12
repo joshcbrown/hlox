@@ -1,31 +1,31 @@
 module Eval where
 
-import AST (
-  BinOp (..),
-  Decl (..),
-  Expr,
-  Expr_ (..),
-  Located (..),
-  Program,
-  Stmt (..),
-  UnOp (..),
-  Value (..),
-  showValuePretty,
- )
 import Control.Monad (void, when)
 import Control.Monad.Error.Class
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Control.Monad.RWS.Class (MonadState)
-import Control.Monad.State (evalStateT, get, gets, modify, put)
+import Control.Monad.State (gets, modify, put)
 import Data.Foldable (for_, traverse_)
 import Data.Functor (($>))
-import Data.Map qualified as M
 import Data.Maybe (fromJust)
 import Environment (Env, assign, declare, enclosing, find, newScope)
-import Error (ExprError_ (..), LoxError, exprError)
 import Text.Megaparsec.Pos
+import Types (
+  BinOp (..),
+  Decl (..),
+  Expr,
+  ExprError_ (..),
+  Expr_ (..),
+  Located (..),
+  LoxError,
+  Program,
+  UnOp (..),
+  Value (..),
+  exprError,
+  showValuePretty,
+ )
 
-evalExpr :: (MonadState Env m, MonadError LoxError m) => Expr -> m Value
+evalExpr :: (MonadState Env m, MonadError LoxError m, MonadIO m) => Expr -> m Value
 evalExpr (Located l e) =
   case e of
     Value v -> pure v
@@ -64,6 +64,10 @@ evalExpr (Located l e) =
       case res of
         Nothing -> throwError . exprError l $ NotInScope ident
         Just newEnv -> put newEnv $> v
+    Call fExpr argsExpr -> do
+      f <- evalExpr fExpr
+      args <- traverse evalExpr argsExpr
+      expectCallable args l f
  where
   neg v = TNum <$> expectNum negate l v
   not' v = TBool <$> expectBool not l v
@@ -101,18 +105,12 @@ evalExpr (Located l e) =
     Neq -> neq'
     Dot -> \_ _ -> throwError . exprError l $ NotSupportedError ". operator"
 
-evalStmt :: (MonadState Env m, MonadError LoxError m, MonadIO m) => Stmt -> m ()
-evalStmt (Print e) = do
-  v <- evalExpr e
-  liftIO $ putStrLn (showValuePretty v)
-evalStmt (EvalExpr e) = void $ evalExpr e
-
 evalDecl :: (MonadState Env m, MonadError LoxError m, MonadIO m) => Decl -> m ()
 evalDecl (Bind i e) = do
   v <- evalExpr e
   modify (declare i v)
 evalDecl (Scope program) = evalProgram program
-evalDecl (Stmt s) = evalStmt s
+evalDecl (EvalExpr e) = void $ evalExpr e
 evalDecl (If cond block1 block2) = do
   b <- evalCond cond
   if b
@@ -124,10 +122,13 @@ evalDecl (While cond block) = loop
     b <- evalCond cond
     when b $ evalProgram block *> loop
 
-evalProgram :: (MonadState Env m, MonadError LoxError m, MonadIO m) => Program -> m ()
-evalProgram prog = modify newScope *> traverse_ evalDecl prog *> modify (fromJust . enclosing)
+evalRepl :: (MonadState Env m, MonadError LoxError m, MonadIO m) => Program -> m ()
+evalRepl = traverse_ evalDecl
 
-evalCond :: (MonadError LoxError m, MonadState Env m) => Expr -> m Bool
+evalProgram :: (MonadState Env m, MonadError LoxError m, MonadIO m) => Program -> m ()
+evalProgram prog = modify newScope *> evalRepl prog *> modify (fromJust . enclosing)
+
+evalCond :: (MonadError LoxError m, MonadState Env m, MonadIO m) => Expr -> m Bool
 evalCond cond = expectBool id (location cond) =<< evalExpr cond
 
 expectNum :: (MonadError LoxError m) => (Double -> a) -> SourcePos -> Value -> m a
@@ -145,3 +146,7 @@ expectString _ l v = throwError . exprError l $ TypeError "string" v
 expectNil :: (MonadError LoxError m) => a -> SourcePos -> Value -> m a
 expectNil a _ TNil = return a
 expectNil _ l v = throwError . exprError l $ TypeError "nil" v
+
+expectCallable :: (MonadError LoxError m, MonadIO m) => [Value] -> SourcePos -> Value -> m Value
+expectCallable args l (TNativeFunction f) = liftIO (f args l) >>= either throwError pure
+expectCallable _ l v = throwError . exprError l $ TypeError "callable" v

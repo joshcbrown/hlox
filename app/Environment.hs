@@ -3,10 +3,10 @@ where
 
 import Data.Map qualified as M
 
-import AST (Value)
 import Control.Applicative ((<|>))
 import Data.Foldable (asum)
 import Data.Functor (($>))
+import Types (Value)
 
 type Scope = M.Map String Value
 
@@ -41,6 +41,9 @@ modifyScope _ (Env []) = Env []
 
 declare :: String -> Value -> Env -> Env
 declare s v = modifyScope (M.insert s v)
+
+global :: M.Map String Value -> Env
+global = Env . (: [])
 
 assign :: String -> Value -> Env -> Maybe Env
 assign _ _ (Env []) = Nothing

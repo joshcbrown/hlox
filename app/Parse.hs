@@ -1,78 +1,19 @@
-module AST (
-  BinOp (..),
-  UnOp (..),
-  Value (..),
-  Expr_ (..),
-  Expr,
-  SourcePos (..),
-  Located (..),
-  Stmt (..),
-  Decl (..),
-  Program,
-  decl,
-  expr,
-  stmt,
-  program,
-  showValuePretty,
+module Parse (
+  runLoxParser,
 )
 where
 
-import Control.Applicative ((<**>))
 import Control.Monad (void)
 import Control.Monad.Combinators.Expr
-import Data.Map qualified as M
 import Data.Maybe (fromMaybe, isJust)
 import Data.Text qualified as T
 import Data.Void (Void)
 import Text.Megaparsec
 import Text.Megaparsec.Char
 import Text.Megaparsec.Char.Lexer qualified as L
-import Text.Megaparsec.Debug (dbg)
+import Types
 
-data BinOp = Dot | Add | Sub | Mul | Div | Or | And | Eq | Neq | Lt | Leq | Gt | Geq
-  deriving (Show)
-data UnOp = Negate | Not
-  deriving (Show)
-data Value = TNum Double | TString String | TBool Bool | TNil
-  deriving (Show)
-data Expr_
-  = Ident String
-  | Value Value
-  | Assgn String Expr
-  | UnOp UnOp Expr
-  | BinOp BinOp Expr Expr
-  | Call Expr [Expr]
-  deriving (Show)
-
-data Located a = Located
-  { location :: SourcePos
-  , unLocate :: a
-  }
-  deriving (Functor)
-
-instance (Show a) => Show (Located a) where
-  show (Located l a) = "(" ++ sourcePosPretty l ++ " " ++ show a ++ ")"
-
-showValuePretty :: Value -> String
-showValuePretty (TNum x) = show x
-showValuePretty (TString s) = show s
-showValuePretty (TBool b) = show b
-showValuePretty TNil = "nil"
-
-data Stmt = Print Expr | EvalExpr Expr
-  deriving (Show)
-
-data Decl
-  = Bind String Expr
-  | Scope [Decl]
-  | Stmt Stmt
-  | If Expr [Decl] (Maybe [Decl])
-  | While Expr [Decl]
-  deriving (Show)
-
-type Expr = Located Expr_
 type Parser = Parsec Void T.Text
-type Program = [Decl]
 
 withLocation :: Parser Expr_ -> Parser Expr
 withLocation p = Located <$> getSourcePos <*> p
@@ -126,7 +67,9 @@ expr_ :: Parser Expr
 expr_ = makeExprParser atom operatorTable
 
 args :: Parser [Expr]
-args = (:) <$> expr_ <*> many (symbol "," *> expr_)
+args = fromMaybe [] <$> optional parseArgs
+ where
+  parseArgs = (:) <$> expr_ <*> many (symbol "," *> expr_)
 
 expr :: Parser Expr
 expr = do
@@ -191,21 +134,12 @@ operatorTable =
 terminal :: Parser ()
 terminal = void (symbol ";")
 
-printStmt :: Parser Stmt
-printStmt = Print <$> (keyword "print" *> expr_ <* terminal)
-
-evalStmt :: Parser Stmt
-evalStmt = EvalExpr <$> (expr_ <* terminal)
-
-stmt :: Parser Stmt
-stmt = printStmt <|> evalStmt
-
 assignStmt :: Parser Decl
 assignStmt = do
   void $ keyword "var"
   name <- ident
   l <- getSourcePos
-  e <- optional (symbol "=" *> expr_)
+  e <- optional (symbol "=" *> expr)
   void terminal
   return $ Bind name (fromMaybe (Located l (Value TNil)) e)
 
@@ -216,7 +150,7 @@ scope :: Parser Decl
 scope = Scope <$> scope_
 
 condition :: Parser Expr
-condition = symbol "(" *> expr_ <* symbol ")"
+condition = symbol "(" *> expr <* symbol ")"
 
 ifStmt :: Parser Decl
 ifStmt =
@@ -233,14 +167,21 @@ whileStmt =
 
 forStmt :: Parser Decl
 forStmt = do
-  pre <- keyword "for" *> symbol "(" *> (assignStmt <|> (Stmt <$> evalStmt))
-  cond <- expr_
-  post <- Stmt . EvalExpr <$> (symbol ";" *> expr_ <* symbol ")")
+  pre <- keyword "for" *> symbol "(" *> assignStmt
+  cond <- expr
+  post <- EvalExpr <$> (symbol ";" *> expr <* symbol ")")
   prog <- scope_
   pure (Scope [pre, While cond (post : prog)])
 
 decl :: Parser Decl
-decl = assignStmt <|> scope <|> ifStmt <|> whileStmt <|> forStmt <|> (Stmt <$> stmt)
+decl = assignStmt <|> scope <|> ifStmt <|> whileStmt <|> forStmt <|> (EvalExpr <$> expr)
 
 program :: Parser [Decl]
 program = some decl
+
+mapLeft :: (a -> c) -> Either a b -> Either c b
+mapLeft f (Left a) = Left (f a)
+mapLeft _ (Right b) = Right b
+
+runLoxParser :: String -> T.Text -> Either LoxError Program
+runLoxParser fname input = mapLeft syntaxError $ runParser program fname input
