@@ -1,13 +1,14 @@
 module Eval where
 
-import Control.Monad (void, when)
+import Control.Applicative ((<|>))
+import Control.Monad (join, void, when)
 import Control.Monad.Error.Class
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Control.Monad.RWS.Class (MonadState)
 import Control.Monad.State (gets, modify, put)
 import Data.Foldable (for_, traverse_)
 import Data.Functor (($>))
-import Data.Maybe (fromJust)
+import Data.Maybe (fromJust, fromMaybe)
 import Environment (Env, assign, declare, enclosing, find, newScope)
 import Text.Megaparsec.Pos
 import Types (
@@ -22,7 +23,6 @@ import Types (
   UnOp (..),
   Value (..),
   exprError,
-  showValuePretty,
  )
 
 evalExpr :: (MonadState Env m, MonadError LoxError m, MonadIO m) => Expr -> m Value
@@ -105,29 +105,45 @@ evalExpr (Located l e) =
     Neq -> neq'
     Dot -> \_ _ -> throwError . exprError l $ NotSupportedError ". operator"
 
-evalDecl :: (MonadState Env m, MonadError LoxError m, MonadIO m) => Decl -> m ()
-evalDecl (Bind i e) = do
+nothing :: (MonadState Env m, MonadError LoxError m, MonadIO m) => m b -> m (Maybe a)
+nothing m = m $> Nothing
+
+evalDecl :: (MonadState Env m, MonadError LoxError m, MonadIO m) => Decl -> m (Maybe Value)
+evalDecl (Bind i e) = nothing $ do
   v <- evalExpr e
   modify (declare i v)
 evalDecl (Scope program) = evalProgram program
-evalDecl (EvalExpr e) = void $ evalExpr e
+evalDecl (EvalExpr e) = nothing $ evalExpr e
 evalDecl (If cond block1 block2) = do
   b <- evalCond cond
   if b
     then evalProgram block1
-    else for_ block2 evalProgram
-evalDecl (While cond block) = loop
+    else maybe (pure Nothing) evalProgram block2
+evalDecl (While cond block) = nothing loop
  where
   loop = do
     b <- evalCond cond
     when b $ evalProgram block *> loop
-evalDecl (Fun name params body) = modify (declare name (TFunction name params body))
+evalDecl (Fun name params body) = nothing $ modify (declare name (TFunction name params body))
+evalDecl (Return e) = Just <$> evalExpr e
 
-evalRepl :: (MonadState Env m, MonadError LoxError m, MonadIO m) => Program -> m ()
-evalRepl = traverse_ evalDecl
+evalRepl :: (MonadState Env m, MonadError LoxError m, MonadIO m) => Program -> m (Maybe Value)
+evalRepl (d : ds) = do
+  r1 <- evalDecl d
+  -- seems we can't use <|> :(
+  case r1 of
+    Nothing -> evalRepl ds
+    Just r -> pure $ Just r
+evalRepl [] = pure Nothing
 
-evalProgram :: (MonadState Env m, MonadError LoxError m, MonadIO m) => Program -> m ()
-evalProgram prog = modify newScope *> evalRepl prog *> modify (fromJust . enclosing)
+evalRepl_ :: (MonadState Env m, MonadError LoxError m, MonadIO m) => Program -> m ()
+evalRepl_ = void . evalRepl
+
+evalProgram :: (MonadState Env m, MonadError LoxError m, MonadIO m) => Program -> m (Maybe Value)
+evalProgram prog = inNewScope $ evalRepl prog
+
+evalProgram_ :: (MonadState Env m, MonadError LoxError m, MonadIO m) => Program -> m ()
+evalProgram_ = void . inNewScope . evalRepl
 
 evalCond :: (MonadError LoxError m, MonadState Env m, MonadIO m) => Expr -> m Bool
 evalCond cond = expectBool id (location cond) =<< evalExpr cond
@@ -162,7 +178,6 @@ expectCallable args l (TFunction name params body) = do
   if length args /= length params
     then throwError . exprError l $ Arity name (length params) (length args)
     else inNewScope $ do
-      traverse_ (\(ident, arg) -> modify (declare ident arg)) (zip params args)
-      evalRepl body
-      pure TNil
+      traverse_ (modify . uncurry declare) (zip params args)
+      fromMaybe TNil <$> evalRepl body
 expectCallable _ l v = throwError . exprError l $ TypeError "callable" v

@@ -74,8 +74,8 @@ commaSeparated p = fromMaybe [] <$> optional parseP
 args :: Parser [Expr]
 args = commaSeparated expr
 
-expr :: Parser Expr
-expr = do
+callExpr :: Parser Expr
+callExpr = do
   e <- expr_
   go e
  where
@@ -87,6 +87,9 @@ expr = do
         void (symbol "(")
         newE <- Located (location e) . Call e <$> (args <* symbol ")")
         go newE
+
+expr :: Parser Expr
+expr = makeExprParser callExpr operatorTable
 
 binary :: T.Text -> (Expr -> Expr -> Expr_) -> Operator Parser Expr
 binary name f = InfixL $ do
@@ -187,6 +190,9 @@ funStmt =
     <* symbol ")"
     <*> scope_
 
+returnStmt :: Parser Decl
+returnStmt = Return <$> (keyword "return" *> expr <* symbol ";")
+
 decl :: Parser Decl
 decl =
   choice
@@ -196,6 +202,7 @@ decl =
     , whileStmt
     , forStmt
     , funStmt
+    , returnStmt
     , EvalExpr <$> (expr <* symbol ";")
     ]
 

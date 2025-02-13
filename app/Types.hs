@@ -58,6 +58,7 @@ data Located a = Located
 
 data Decl
   = Bind String Expr
+  | Return Expr
   | Scope [Decl]
   | EvalExpr Expr
   | If Expr [Decl] (Maybe [Decl])
@@ -77,6 +78,7 @@ showValuePretty (TString s) = show s
 showValuePretty (TBool b) = show b
 showValuePretty TNil = "nil"
 showValuePretty (TNativeFunction _) = "<native function>"
+showValuePretty (TFunction name _ _) = "<function " ++ name ++ ">"
 
 data LoxError = SyntaxError (ParseErrorBundle Text Void) | RuntimeError ExprError
 
