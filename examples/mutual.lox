@@ -1,0 +1,13 @@
+fun even(n) {
+    if (n == 0) { return true; }
+    if (n == 1) { return false; }
+    return odd(n - 1);
+}
+
+fun odd(n) {
+    if (n == 0) { return false; }
+    if (n == 1) { return true; }
+    return even(n - 1);
+}
+
+print("odd(4)", odd(4));
