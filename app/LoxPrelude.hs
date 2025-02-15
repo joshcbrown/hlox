@@ -15,5 +15,5 @@ printy :: NativeFunction
 printy [] _ = putStrLn "" $> Right TNil
 printy (x : xs) l = putStr (showValuePretty x ++ " ") *> printy xs l
 
-globalEnv :: Env
+globalEnv :: IO Env
 globalEnv = global $ M.fromList [("clock", TNativeFunction clock), ("print", TNativeFunction printy)]
