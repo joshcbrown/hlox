@@ -5,6 +5,9 @@ where
 
 import Control.Monad (void)
 import Control.Monad.Combinators.Expr
+import Control.Monad.State (StateT, evalStateT, gets, modify)
+import Data.Bool (bool)
+import Data.Map qualified as M
 import Data.Maybe (fromMaybe, isJust)
 import Data.Text qualified as T
 import Data.Void (Void)
@@ -13,7 +16,58 @@ import Text.Megaparsec.Char
 import Text.Megaparsec.Char.Lexer qualified as L
 import Types
 
-type Parser = Parsec Void T.Text
+data InitState = Initialised | Uninitialised | Undeclared
+  deriving (Eq, Show)
+
+type Scope = M.Map String InitState
+
+newtype ParseState = ParseState
+  { funScopes :: [Scope]
+  }
+  deriving (Show)
+
+globals :: [String]
+globals = ["print", "clock"]
+
+initialState :: ParseState
+initialState = ParseState [M.empty]
+
+modifyScopes :: ([Scope] -> [Scope]) -> ParseState -> ParseState
+modifyScopes f state = state{funScopes = f (funScopes state)}
+
+modifyInnermostScope :: (Scope -> Scope) -> ParseState -> ParseState
+modifyInnermostScope f state = case funScopes state of
+  [] -> state
+  s : ss -> state{funScopes = f s : ss}
+
+newFun :: ParseState -> ParseState
+newFun = modifyScopes (M.empty :)
+
+endFun :: ParseState -> ParseState
+endFun = modifyScopes tail
+
+declare :: String -> ParseState -> ParseState
+declare name = modifyInnermostScope (M.insert name Uninitialised)
+
+initialise :: String -> ParseState -> ParseState
+initialise name = modifyInnermostScope (M.insert name Initialised)
+
+initState :: String -> ParseState -> InitState
+initState name state =
+  fromMaybe Undeclared $ funState <|> globalState
+ where
+  funState = M.lookup name . head . funScopes $ state
+  globalState = if name `elem` globals then Just Initialised else Nothing
+
+assertInFunction :: Parser ()
+assertInFunction =
+  gets ((> 1) . length . funScopes)
+    >>= bool (fail "return statement must be in function") (pure ())
+
+type Parser = StateT ParseState (Parsec Void T.Text)
+
+parseTest' :: (Show a) => Parser a -> String -> IO ()
+parseTest' p s = parseTest (evalStateT p initialState) (T.pack s)
 
 withLocation :: Parser Expr_ -> Parser Expr
 withLocation p = Located <$> getSourcePos <*> p
@@ -47,16 +101,24 @@ literal =
 parens :: Parser a -> Parser a
 parens = between (symbol "(") (symbol ")")
 
+varReference :: String -> Parser String
+varReference name = do
+  state <- gets (initState name)
+  case state of
+    Initialised -> pure name
+    Uninitialised -> fail "can't reference variable in own initialiser"
+    Undeclared -> fail $ "var " ++ name ++ " has not been declared in this scope"
+
 assgn :: Parser Expr
 assgn = do
   loc <- getSourcePos
-  lval <- ident
+  lval <- varReference =<< ident
   equality <- isJust <$> optional (lookAhead (symbol "=="))
   if equality
     then pure $ Located loc $ Ident lval
     else do
       rhs <- optional (symbol "=" *> expr_)
-      return $ case rhs of
+      pure $ case rhs of
         Nothing -> Located loc $ Ident lval
         Just e -> Located loc $ Assgn lval e
 
@@ -140,14 +202,28 @@ operatorTable =
 terminal :: Parser ()
 terminal = void (symbol ";")
 
+ensureUndeclared :: String -> Parser a -> Parser a
+ensureUndeclared name p = do
+  state <- gets (initState name)
+  if state /= Undeclared
+    then
+      fail $
+        "shadowing: variable "
+          ++ name
+          ++ " has already been declared in the current scope"
+    else p
+
 assignStmt :: Parser Decl
 assignStmt = do
   void $ keyword "var"
   name <- ident
-  l <- getSourcePos
-  e <- optional (symbol "=" *> expr)
-  void terminal
-  return $ Bind name (fromMaybe (Located l (Value TNil)) e)
+  ensureUndeclared name $ do
+    modify (declare name)
+    l <- getSourcePos
+    e <- optional (symbol "=" *> expr)
+    modify (initialise name)
+    void terminal
+    return $ Bind name (fromMaybe (Located l (Value TNil)) e)
 
 scope_ :: Parser [Decl]
 scope_ = symbol "{" *> program <* symbol "}"
@@ -177,21 +253,24 @@ forStmt = do
   cond <- expr
   post <- EvalExpr <$> (symbol ";" *> expr <* symbol ")")
   prog <- scope_
-  pure (Scope [pre, While cond (post : prog)])
+  pure (Scope [pre, While cond (prog ++ [post])])
 
 params :: Parser [String]
 params = commaSeparated ident
 
 funStmt :: Parser Decl
-funStmt =
-  Fun
-    <$> (keyword "fun" *> ident <* symbol "(")
-    <*> params
-    <* symbol ")"
-    <*> scope_
+funStmt = do
+  name <- keyword "fun" *> ident <* symbol "("
+  ps <- params <* symbol ")"
+  modify (initialise name)
+  modify newFun
+  mapM_ (modify . initialise) (name : ps)
+  body <- scope_
+  modify endFun
+  pure $ Fun name ps body
 
 returnStmt :: Parser Decl
-returnStmt = Return <$> (keyword "return" *> expr <* symbol ";")
+returnStmt = Return <$> (keyword "return" *> assertInFunction *> expr <* symbol ";")
 
 decl :: Parser Decl
 decl =
@@ -214,4 +293,4 @@ mapLeft f (Left a) = Left (f a)
 mapLeft _ (Right b) = Right b
 
 runLoxParser :: String -> T.Text -> Either LoxError Program
-runLoxParser fname input = mapLeft syntaxError $ runParser program fname input
+runLoxParser fname input = mapLeft syntaxError $ runParser (evalStateT program initialState) fname input
