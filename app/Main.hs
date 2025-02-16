@@ -14,8 +14,9 @@ import System.Console.Haskeline
 import Types (LoxError)
 
 runRepl :: IO ()
-runRepl = globalEnv >>= evalStateT (runInputT settings repl)
+runRepl = evalStateT (runInputT settings repl) initialState
  where
+  initialState = globalEnv
   settings =
     defaultSettings
       { historyFile = Just ".lox_history"
@@ -43,8 +44,7 @@ executeProgram input = either throwError pure (runLoxParser "" input) >>= evalPr
 regular :: FilePath -> IO ()
 regular file = do
   t <- T.pack <$> readFile file
-  global <- globalEnv
-  res <- runExceptT (evalStateT (executeProgram t) global)
+  res <- runExceptT (evalStateT (executeProgram t) globalEnv)
   case res of
     Left e -> print e
     Right () -> pure ()
