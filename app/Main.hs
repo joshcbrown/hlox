@@ -36,10 +36,10 @@ repl = do
       repl
 
 executeRepl :: (MonadState Env m, MonadError LoxError m, MonadIO m) => T.Text -> m ()
-executeRepl input = either throwError pure (runLoxParser "" input) >>= evalRepl_
+executeRepl input = either throwError pure (runLoxParser False "" input) >>= evalRepl_
 
 executeProgram :: (MonadState Env m, MonadError LoxError m, MonadIO m) => T.Text -> m ()
-executeProgram input = either throwError pure (runLoxParser "" input) >>= evalProgram_
+executeProgram input = either throwError pure (runLoxParser True "" input) >>= evalProgram_
 
 regular :: FilePath -> IO ()
 regular file = do
