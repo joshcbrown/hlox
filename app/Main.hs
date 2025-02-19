@@ -5,13 +5,12 @@ import Control.Monad.Except (MonadError (..), runExceptT)
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Control.Monad.State (MonadState, MonadTrans (lift), evalStateT)
 import Data.Text qualified as T
-import Environment (Env)
 import Eval (evalProgram_, evalRepl_)
 import LoxPrelude (globalEnv)
 import Opts (ExecutionMode (..), executionMode, parseOptions)
 import Parse (runLoxParser)
 import System.Console.Haskeline
-import Types (LoxError)
+import Types (Env, LoxError)
 
 runRepl :: IO ()
 runRepl = evalStateT (runInputT settings repl) initialState
@@ -36,10 +35,10 @@ repl = do
       repl
 
 executeRepl :: (MonadState Env m, MonadError LoxError m, MonadIO m) => T.Text -> m ()
-executeRepl input = either throwError pure (runLoxParser "" input) >>= evalRepl_
+executeRepl input = either throwError pure (runLoxParser False "" input) >>= evalRepl_
 
 executeProgram :: (MonadState Env m, MonadError LoxError m, MonadIO m) => T.Text -> m ()
-executeProgram input = either throwError pure (runLoxParser "" input) >>= evalProgram_
+executeProgram input = either throwError pure (runLoxParser True "" input) >>= evalProgram_
 
 regular :: FilePath -> IO ()
 regular file = do
