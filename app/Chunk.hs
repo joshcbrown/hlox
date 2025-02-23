@@ -23,6 +23,9 @@ data Chunk = Chunk
   }
   deriving (Show)
 
+valuePretty :: Value -> String
+valuePretty = show
+
 toWord :: OpCode -> Word8
 toWord = fromIntegral . fromEnum
 
@@ -58,6 +61,11 @@ disassembleInstruction = do
     OpReturn ->
       let finalString = sformat (stext % "OP_RETURN") prefix
        in finalString <$ put (idx + 1)
+
+disassembleInstruction_ :: Int -> Chunk -> IO ()
+disassembleInstruction_ offset chunk =
+  let ?chunk = chunk
+   in TIO.putStrLn $ evalState disassembleInstruction offset
 
 disassembleChunk :: Chunk -> IO ()
 disassembleChunk chunk =

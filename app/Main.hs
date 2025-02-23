@@ -15,6 +15,7 @@ import Opts (ExecutionMode (..), executionMode, parseOptions)
 import Parse (runLoxParser)
 import System.Console.Haskeline
 import Types (LoxError)
+import VirtualMachine qualified as VM
 
 runRepl :: IO ()
 runRepl = evalStateT (runInputT settings repl) initialState
@@ -66,3 +67,7 @@ main :: IO ()
 main = do
   putStrLn "== test chunk =="
   disassembleChunk exChunk
+  res <- VM.runProgram exChunk
+  case res of
+    Left e -> print e
+    Right () -> pure ()
