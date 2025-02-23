@@ -262,7 +262,7 @@ forStmt = do
 params :: Parser [String]
 params = commaSeparated ident
 
-funStmt :: Parser Fun
+funStmt :: Parser Decl
 funStmt = do
   name <- keyword "fun" *> ident <* symbol "("
   ps <- params <* symbol ")"
@@ -272,15 +272,6 @@ funStmt = do
   body <- scope_
   modify endFun
   pure $ Fun name ps body
-
-classDecl :: Parser Decl
-classDecl = do
-  name <- keyword "Class" *> ident <* symbol "{"
-  modify newFun
-  modify (initialise name)
-  fs <- many funStmt
-  modify endFun
-  pure $ ClassDecl (Class name fs)
 
 returnStmt :: Parser Decl
 returnStmt = Return <$> (keyword "return" *> assertInFunction *> expr <* symbol ";")
@@ -293,8 +284,7 @@ decl =
     , ifStmt
     , whileStmt
     , forStmt
-    , FunDecl <$> funStmt
-    , classDecl
+    , funStmt
     , returnStmt
     , EvalExpr <$> (expr <* symbol ";")
     ]

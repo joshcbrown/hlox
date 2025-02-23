@@ -1,16 +1,20 @@
 module Main where
 
+import Chunk
 import Control.Monad.Catch (MonadMask)
 import Control.Monad.Except (MonadError (..), runExceptT)
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Control.Monad.State (MonadState, MonadTrans (lift), evalStateT)
+import Data.ByteString qualified as BS
 import Data.Text qualified as T
+import Data.Vector qualified as Vec
+import Environment (Env)
 import Eval (evalProgram_, evalRepl_)
 import LoxPrelude (globalEnv)
 import Opts (ExecutionMode (..), executionMode, parseOptions)
 import Parse (runLoxParser)
 import System.Console.Haskeline
-import Types (Env, LoxError)
+import Types (LoxError)
 
 runRepl :: IO ()
 runRepl = evalStateT (runInputT settings repl) initialState
@@ -48,9 +52,17 @@ regular file = do
     Left e -> print e
     Right () -> pure ()
 
+-- old
+-- main :: IO ()
+-- main = do
+--   opts <- parseOptions
+--   case executionMode opts of
+--     Repl -> runRepl
+--     File file -> regular file
+
+-- new (temporary)
+
 main :: IO ()
 main = do
-  opts <- parseOptions
-  case executionMode opts of
-    Repl -> runRepl
-    File file -> regular file
+  putStrLn "== test chunk =="
+  disassembleChunk exChunk

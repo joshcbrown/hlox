@@ -49,12 +49,14 @@ executable lox
   main-is: Main.hs
   -- Modules included in this executable, other than Main.
   other-modules:
+    Chunk
     Environment
     Eval
     LoxPrelude
     Opts
     Parse
     Types
+    VirtualMachine
 
   -- LANGUAGE extensions used by modules in this package.
   default-extensions:
@@ -65,8 +67,10 @@ executable lox
   -- Other library packages from which modules are imported.
   build-depends:
     base ^>=4.17.2.1,
+    bytestring,
     containers,
     exceptions,
+    formatting ^>=7.2.0,
     haskeline ^>=0.8.2.1,
     megaparsec ^>=9.6.1,
     mtl,
@@ -75,8 +79,10 @@ executable lox
     text,
     time,
     transformers,
+    vector,
 
   -- Directories containing source files.
   hs-source-dirs: app
-  -- Base language which the package is written in.
   default-language: GHC2021
+
+-- Base language which the package is written in.
