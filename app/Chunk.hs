@@ -12,7 +12,7 @@ import Data.Vector qualified as Vec
 import Data.Word (Word8)
 import Formatting
 
-data OpCode = OpConstant | OpReturn
+data OpCode = OpConstant | OpNegate | OpAdd | OpSub | OpMul | OpDiv | OpReturn
   deriving (Enum, Show)
 
 type Value = Double
@@ -59,8 +59,20 @@ disassembleInstruction = do
               value
        in finalString <$ put (idx + 2)
     OpReturn ->
-      let finalString = sformat (stext % "OP_RETURN") prefix
-       in finalString <$ put (idx + 1)
+      simple $ sformat (stext % "OP_RETURN") prefix
+    OpNegate ->
+      simple $ sformat (stext % "OP_NEGATE") prefix
+    OpAdd ->
+      simple $ sformat (stext % "OP_ADD") prefix
+    OpSub ->
+      simple $ sformat (stext % "OP_SUBTRACT") prefix
+    OpMul ->
+      simple $ sformat (stext % "OP_MULTIPLY") prefix
+    OpDiv ->
+      simple $ sformat (stext % "OP_DIVIDE") prefix
+
+simple :: (MonadState Int m) => Text -> m Text
+simple t = t <$ modify (+ 1)
 
 disassembleInstruction_ :: Int -> Chunk -> IO ()
 disassembleInstruction_ offset chunk =
@@ -83,7 +95,19 @@ disassembleLoop = do
 exChunk :: Chunk
 exChunk =
   Chunk
-    { code = BS.pack [toWord OpConstant, 0, toWord OpReturn]
-    , constants = Vec.fromList [23]
-    , lineNumbers = Vec.fromList $ replicate 3 123
+    { code =
+        BS.pack
+          [ toWord OpConstant
+          , 0
+          , toWord OpConstant
+          , 1
+          , toWord OpAdd
+          , toWord OpConstant
+          , 2
+          , toWord OpDiv
+          , toWord OpNegate
+          , toWord OpReturn
+          ]
+    , constants = Vec.fromList [1.2, 3.4, 5.6]
+    , lineNumbers = Vec.fromList $ replicate 10 123
     }

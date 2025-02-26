@@ -1,12 +1,13 @@
 module VirtualMachine where
 
 import Chunk qualified
-import Control.Monad (when)
+import Control.Monad (forM, forM_, when)
 import Control.Monad.Except (ExceptT, MonadError (..), runExceptT)
 import Control.Monad.IO.Class (MonadIO (..))
 import Control.Monad.Reader (MonadReader (..), ReaderT, ask, asks, runReaderT)
 import Control.Monad.State (MonadState (..), StateT, evalStateT, gets, modify, put)
 import Data.ByteString qualified as BS
+import Data.List (intercalate)
 import Data.Vector qualified as Vec
 import Data.Vector.Mutable qualified as MVec
 import Data.Word (Word8)
@@ -26,17 +27,20 @@ debug :: Bool
 debug = True
 
 initialState :: IO VMState
-initialState = VMState 0 0 <$> MVec.replicate 0 1024
+initialState = VMState 0 0 <$> MVec.replicate 1024 0
 
 -- TODO: check for stack overflow
-push :: Chunk.Value -> VMState -> IO VMState
-push value s@(VMState _ stackTop stack) = do
-  MVec.write stack stackTop value
-  pure s{stack = stack, stackTop = stackTop + 1}
+push :: (MonadState VMState m, MonadIO m) => Chunk.Value -> m ()
+push value = do
+  s <- get
+  liftIO $ MVec.write (stack s) (stackTop s) value
+  put s{stackTop = stackTop s + 1}
 
--- this can be pure because we don't need to update the underlying vec
-pop :: VMState -> VMState
-pop s = s{stackTop = stackTop s + 1}
+pop :: (MonadState VMState m, MonadIO m) => m Chunk.Value
+pop = do
+  s <- get
+  put (s{stackTop = stackTop s - 1})
+  liftIO $ MVec.read (stack s) (stackTop s - 1)
 
 modifyInstruction :: (MonadState VMState m) => Int -> m ()
 modifyInstruction i = modify (\vm -> vm{currentInstruction = i})
@@ -49,18 +53,32 @@ readByte = do
 readConstant :: (MonadReader Chunk.Chunk m, MonadState VMState m) => m Chunk.Value
 readConstant = readByte >>= (asks . Chunk.getValue) . fromIntegral
 
+showIOVector :: (Show a) => MVec.IOVector a -> Int -> IO String
+showIOVector v n = do
+  elements <- traverse (fmap show . MVec.read v) [0 .. n - 1]
+  pure $ "[" ++ intercalate ", " elements ++ "]"
+
+binOp :: (MonadState VMState m, MonadIO m) => (Chunk.Value -> Chunk.Value -> Chunk.Value) -> m ()
+binOp op = do
+  b <- pop
+  a <- pop
+  push (op a b)
+
 interpret :: (MonadReader Chunk.Chunk m, MonadState VMState m, MonadError LoxError m, MonadIO m) => m ()
 interpret = do
   when debug $ do
-    stack <- gets stack
+    s <- get
+    liftIO (showIOVector (stack s) (stackTop s) >>= putStrLn)
     debugCurrentInstruction
   op <- Chunk.fromWord <$> readByte
   case op of
     Chunk.OpReturn -> pure ()
-    Chunk.OpConstant -> do
-      c <- readConstant
-      liftIO $ putStrLn (Chunk.valuePretty c)
-      interpret
+    Chunk.OpConstant -> readConstant >>= (<* interpret) . push
+    Chunk.OpNegate -> pop >>= (<* interpret) . (push . negate)
+    Chunk.OpAdd -> binOp (+) <* interpret
+    Chunk.OpSub -> binOp (-) <* interpret
+    Chunk.OpMul -> binOp (*) <* interpret
+    Chunk.OpDiv -> binOp (/) <* interpret
 
 debugCurrentInstruction :: (MonadReader Chunk.Chunk m, MonadState VMState m, MonadIO m) => m ()
 debugCurrentInstruction = do
