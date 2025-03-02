@@ -1,5 +1,8 @@
 module Parse (
   runLoxParser,
+  parseTest',
+  parseTest'',
+  expr_,
 )
 where
 
@@ -70,6 +73,9 @@ type Parser = StateT ParseState (ReaderT Bool (Parsec Void T.Text))
 
 parseTest' :: (Show a) => Parser a -> String -> IO ()
 parseTest' p s = parseTest (runReaderT (evalStateT p initialState) False) (T.pack s)
+
+parseTest'' :: Parser a -> T.Text -> Either LoxError a
+parseTest'' p input = mapLeft syntaxError $ runParser (runReaderT (evalStateT p initialState) True) "" input
 
 ifNeeded :: Parser () -> Parser ()
 ifNeeded p = ask >>= flip when p

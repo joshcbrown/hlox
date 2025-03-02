@@ -86,5 +86,5 @@ debugCurrentInstruction = do
   chunk <- ask
   liftIO $ Chunk.disassembleInstruction_ idx chunk
 
-runProgram :: Chunk.Chunk -> IO (Either LoxError ())
-runProgram chunk = initialState >>= runExceptT . evalStateT (runReaderT interpret chunk)
+runProgram :: (MonadError LoxError m, MonadIO m) => Chunk.Chunk -> m ()
+runProgram chunk = liftIO initialState >>= evalStateT (runReaderT interpret chunk)

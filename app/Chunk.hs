@@ -1,3 +1,7 @@
+{-# LANGUAGE RecordWildCards #-}
+-- temporary
+{-# OPTIONS_GHC -Wno-incomplete-patterns #-}
+
 module Chunk where
 
 import Control.Monad
@@ -11,6 +15,9 @@ import Data.Vector ((!))
 import Data.Vector qualified as Vec
 import Data.Word (Word8)
 import Formatting
+import Parse
+import Text.Megaparsec.Pos
+import Types qualified as T
 
 data OpCode = OpConstant | OpNegate | OpAdd | OpSub | OpMul | OpDiv | OpReturn
   deriving (Enum, Show)
@@ -19,9 +26,15 @@ type Value = Double
 data Chunk = Chunk
   { code :: BS.ByteString
   , constants :: Vec.Vector Value
-  , lineNumbers :: Vec.Vector Int
+  , sourceInfo :: Vec.Vector T.SourcePos
   }
   deriving (Show)
+
+instance Semigroup Chunk where
+  (Chunk c11 c12 c13) <> (Chunk c21 c22 c23) = Chunk (c11 <> c21) (c12 <> c22) (c13 <> c23)
+
+instance Monoid Chunk where
+  mempty = Chunk{code = BS.empty, constants = Vec.empty, sourceInfo = Vec.empty}
 
 valuePretty :: Value -> String
 valuePretty = show
@@ -39,7 +52,7 @@ getValue :: Int -> Chunk -> Value
 getValue idx = (! idx) . constants
 
 getLineNumber :: Int -> Chunk -> Int
-getLineNumber idx = (! idx) . lineNumbers
+getLineNumber idx = T.unPos . T.sourceLine . (! idx) . sourceInfo
 
 disassembleInstruction :: (MonadState Int m, ?chunk :: Chunk) => m Text
 disassembleInstruction = do
@@ -109,5 +122,45 @@ exChunk =
           , toWord OpReturn
           ]
     , constants = Vec.fromList [1.2, 3.4, 5.6]
-    , lineNumbers = Vec.fromList $ replicate 10 123
+    , sourceInfo = Vec.fromList $ replicate 10 (T.SourcePos "foo" (mkPos 10) (mkPos 10))
     }
+
+fromValue :: (MonadState Word8 m) => SourcePos -> T.Value -> m Chunk
+fromValue l (T.TNum x) = do
+  idx <- get
+  modify (+ 1)
+  let code = BS.pack [toWord OpConstant, idx]
+      constants = Vec.singleton x
+      sourceInfo = Vec.fromList [l, l]
+  pure Chunk{..}
+
+fromBinOp :: T.BinOp -> OpCode
+fromBinOp T.Add = OpAdd
+fromBinOp T.Sub = OpSub
+fromBinOp T.Mul = OpMul
+fromBinOp T.Div = OpDiv
+
+fromUnOp :: T.UnOp -> OpCode
+fromUnOp T.Negate = OpNegate
+
+fromOp :: (op -> OpCode) -> SourcePos -> op -> Chunk
+fromOp f l op =
+  let instruction = toWord . f $ op
+   in Chunk (BS.singleton instruction) Vec.empty (Vec.singleton l)
+
+fromExpr :: (MonadState Word8 m) => T.Expr -> m Chunk
+fromExpr (T.Located l (T.BinOp op e1 e2)) = do
+  c1 <- fromExpr e1
+  c2 <- fromExpr e2
+  pure (c1 <> c2 <> fromOp fromBinOp l op)
+fromExpr (T.Located l (T.UnOp op e1)) = do
+  c <- fromExpr e1
+  pure (c <> fromOp fromUnOp l op)
+fromExpr (T.Located l (T.Value v)) = fromValue l v
+
+-- TODO: remove
+terminal :: Chunk
+terminal = Chunk (BS.singleton (toWord OpReturn)) Vec.empty (Vec.singleton (SourcePos "" (mkPos 1) (mkPos 1)))
+
+fromExpr_ :: T.Expr -> Chunk
+fromExpr_ e = evalState (fromExpr e) 0 <> terminal

@@ -12,21 +12,20 @@ import Environment (Env)
 import Eval (evalProgram_, evalRepl_)
 import LoxPrelude (globalEnv)
 import Opts (ExecutionMode (..), executionMode, parseOptions)
-import Parse (runLoxParser)
+import Parse (expr_, parseTest'', runLoxParser)
 import System.Console.Haskeline
 import Types (LoxError)
 import VirtualMachine qualified as VM
 
 runRepl :: IO ()
-runRepl = evalStateT (runInputT settings repl) initialState
+runRepl = VM.initialState >>= evalStateT (runInputT settings repl)
  where
-  initialState = globalEnv
   settings =
     defaultSettings
       { historyFile = Just ".lox_history"
       }
 
-repl :: (MonadState Env m, MonadIO m, MonadMask m) => InputT m ()
+repl :: (MonadIO m, MonadMask m) => InputT m ()
 repl = do
   minput <- getInputLine "lox> "
   case minput of
@@ -39,8 +38,12 @@ repl = do
         _ -> pure ()
       repl
 
-executeRepl :: (MonadState Env m, MonadError LoxError m, MonadIO m) => T.Text -> m ()
-executeRepl input = either throwError pure (runLoxParser False "" input) >>= evalRepl_
+executeRepl :: (MonadError LoxError m, MonadIO m) => T.Text -> m ()
+executeRepl input =
+  either throwError pure (parseTest'' expr_ input) >>= \e -> do
+    let c = Chunk.fromExpr_ e
+    liftIO $ disassembleChunk c
+    VM.runProgram c
 
 executeProgram :: (MonadState Env m, MonadError LoxError m, MonadIO m) => T.Text -> m ()
 executeProgram input = either throwError pure (runLoxParser True "" input) >>= evalProgram_
@@ -65,9 +68,4 @@ regular file = do
 
 main :: IO ()
 main = do
-  putStrLn "== test chunk =="
-  disassembleChunk exChunk
-  res <- VM.runProgram exChunk
-  case res of
-    Left e -> print e
-    Right () -> pure ()
+  runRepl

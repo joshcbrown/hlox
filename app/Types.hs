@@ -6,6 +6,7 @@ module Types (
   Expr_ (..),
   Expr,
   SourcePos (..),
+  unPos,
   Located (..),
   Decl (..),
   Program,
