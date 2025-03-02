@@ -93,7 +93,7 @@ symbol :: T.Text -> Parser T.Text
 symbol = L.symbol sc
 
 keyword :: T.Text -> Parser T.Text
-keyword word = lexeme . try $ string word <* notFollowedBy alphaNumChar
+keyword word = symbol word <* notFollowedBy alphaNumChar
 
 ident :: Parser String
 ident = lexeme ((:) <$> letterChar <*> many alphaNumChar)
@@ -167,12 +167,12 @@ expr = makeExprParser callExpr operatorTable
 
 binary :: T.Text -> (Expr -> Expr -> Expr_) -> Operator Parser Expr
 binary name f = InfixL $ do
-  l <- getSourcePos <* keyword name
+  l <- getSourcePos <* symbol name
   return $ \e1 e2 -> Located l (f e1 e2)
 
 prefix :: T.Text -> (Expr -> Expr_) -> Operator Parser Expr
 prefix name f = Prefix $ do
-  l <- getSourcePos <* keyword name
+  l <- getSourcePos <* symbol name
   return $ \e -> Located l (f e)
 
 -- decreasing precedence
