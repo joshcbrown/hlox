@@ -182,8 +182,7 @@ prefix name f = Prefix $ do
 -- where this arises, but i cbs rolling my own
 operatorTable :: [[Operator Parser Expr]]
 operatorTable =
-  [ [binary "." (BinOp Dot)]
-  ,
+  [
     [ prefix "-" (UnOp Negate)
     , prefix "!" (UnOp Not)
     ]
@@ -206,8 +205,8 @@ operatorTable =
     , binary "!=" (BinOp Neq)
     ]
   ,
-    [ binary "and" (BinOp And)
-    , binary "or" (BinOp Or)
+    [ binary "&&" (BinOp And)
+    , binary "||" (BinOp Or)
     ]
   ]
 

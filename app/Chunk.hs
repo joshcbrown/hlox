@@ -1,6 +1,4 @@
 {-# LANGUAGE RecordWildCards #-}
--- temporary
-{-# OPTIONS_GHC -Wno-incomplete-patterns #-}
 
 module Chunk where
 
@@ -9,23 +7,39 @@ import Control.Monad.State
 import Control.Monad.Writer
 import Data.ByteString qualified as BS
 import Data.Foldable
-import Data.Text (Text)
+import Data.Text (Text, pack)
 import Data.Text.IO qualified as TIO
 import Data.Vector ((!))
 import Data.Vector qualified as Vec
 import Data.Word (Word8)
 import Formatting
+import GHC.ExecutionStack (Location (functionName))
 import Parse
 import Text.Megaparsec.Pos
 import Types qualified as T
 
-data OpCode = OpConstant | OpNegate | OpAdd | OpSub | OpMul | OpDiv | OpReturn
+data OpCode
+  = OpConstant
+  | OpNegate
+  | OpAdd
+  | OpSub
+  | OpMul
+  | OpDiv
+  | OpNot
+  | OpOr
+  | OpAnd
+  | OpEq
+  | OpNeq
+  | OpLt
+  | OpLeq
+  | OpGt
+  | OpGeq
+  | OpReturn
   deriving (Enum, Show)
 
-type Value = Double
 data Chunk = Chunk
   { code :: BS.ByteString
-  , constants :: Vec.Vector Value
+  , constants :: Vec.Vector T.Value
   , sourceInfo :: Vec.Vector T.SourcePos
   }
   deriving (Show)
@@ -36,8 +50,13 @@ instance Semigroup Chunk where
 instance Monoid Chunk where
   mempty = Chunk{code = BS.empty, constants = Vec.empty, sourceInfo = Vec.empty}
 
-valuePretty :: Value -> String
-valuePretty = show
+valuePretty :: T.Value -> Text
+valuePretty (T.TNum x) = sformat (fixed 2) x
+valuePretty (T.TBool b) = pack (show b)
+valuePretty (T.TString s) = pack s
+valuePretty (T.TNativeFunction _) = "native fun"
+valuePretty (T.TFunction name _ _) = sformat ("function " % stext) (pack name)
+valuePretty T.TNil = "nil"
 
 toWord :: OpCode -> Word8
 toWord = fromIntegral . fromEnum
@@ -48,11 +67,14 @@ fromWord = toEnum . fromIntegral
 readWord :: Int -> Chunk -> Word8
 readWord idx = (`BS.index` idx) . code
 
-getValue :: Int -> Chunk -> Value
+getValue :: Int -> Chunk -> T.Value
 getValue idx = (! idx) . constants
 
 getLineNumber :: Int -> Chunk -> Int
 getLineNumber idx = T.unPos . T.sourceLine . (! idx) . sourceInfo
+
+getSourcePos :: Int -> Chunk -> T.SourcePos
+getSourcePos idx = (! idx) . sourceInfo
 
 disassembleInstruction :: (MonadState Int m, ?chunk :: Chunk) => m Text
 disassembleInstruction = do
@@ -65,24 +87,13 @@ disassembleInstruction = do
           value = getValue valueIdx ?chunk
           finalString =
             sformat
-              (stext % right 16 ' ' % " " % left 4 ' ' % " '" % fixed 2 % "'")
+              (stext % right 16 ' ' % " " % left 4 ' ' % " '" % stext % "'")
               prefix
-              ("OP_CONSTANT" :: Text)
+              (pack . show $ op)
               valueIdx
-              value
+              (valuePretty value)
        in finalString <$ put (idx + 2)
-    OpReturn ->
-      simple $ sformat (stext % "OP_RETURN") prefix
-    OpNegate ->
-      simple $ sformat (stext % "OP_NEGATE") prefix
-    OpAdd ->
-      simple $ sformat (stext % "OP_ADD") prefix
-    OpSub ->
-      simple $ sformat (stext % "OP_SUBTRACT") prefix
-    OpMul ->
-      simple $ sformat (stext % "OP_MULTIPLY") prefix
-    OpDiv ->
-      simple $ sformat (stext % "OP_DIVIDE") prefix
+    _ -> simple $ sformat (stext % stext) prefix (pack . show $ op)
 
 simple :: (MonadState Int m) => Text -> m Text
 simple t = t <$ modify (+ 1)
@@ -121,27 +132,40 @@ exChunk =
           , toWord OpNegate
           , toWord OpReturn
           ]
-    , constants = Vec.fromList [1.2, 3.4, 5.6]
+    , constants = Vec.fromList [T.TNum 1.2, T.TNum 3.4, T.TNum 5.6]
     , sourceInfo = Vec.fromList $ replicate 10 (T.SourcePos "foo" (mkPos 10) (mkPos 10))
     }
 
 fromValue :: (MonadState Word8 m) => SourcePos -> T.Value -> m Chunk
-fromValue l (T.TNum x) = do
+fromValue l v = do
   idx <- get
   modify (+ 1)
   let code = BS.pack [toWord OpConstant, idx]
-      constants = Vec.singleton x
+      constants = Vec.singleton v
       sourceInfo = Vec.fromList [l, l]
   pure Chunk{..}
 
 fromBinOp :: T.BinOp -> OpCode
-fromBinOp T.Add = OpAdd
-fromBinOp T.Sub = OpSub
-fromBinOp T.Mul = OpMul
-fromBinOp T.Div = OpDiv
+fromBinOp = \case
+  T.Add -> OpAdd
+  T.Sub -> OpSub
+  T.Mul -> OpMul
+  T.Div -> OpDiv
+  T.Or -> OpOr
+  T.And -> OpAnd
+  T.Eq -> OpEq
+  T.Neq -> OpNeq
+  T.Leq -> OpLeq
+  T.Lt -> OpLt
+  T.Gt -> OpGt
+  T.Geq -> OpGeq
+
+-- data BinOp = Dot | Add | Sub | Mul | Div | Or | And | Eq | Neq | Lt | Leq | Gt | Geq
 
 fromUnOp :: T.UnOp -> OpCode
-fromUnOp T.Negate = OpNegate
+fromUnOp = \case
+  T.Negate -> OpNegate
+  T.Not -> OpNot
 
 fromOp :: (op -> OpCode) -> SourcePos -> op -> Chunk
 fromOp f l op =

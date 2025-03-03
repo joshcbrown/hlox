@@ -17,7 +17,7 @@ data VMState = VMState
   { -- in the book, this is represented as just a ByteString, but i'm not sure that's practical...
     currentInstruction :: Int
   , stackTop :: Int
-  , stack :: MVec.IOVector Chunk.Value
+  , stack :: MVec.IOVector Value
   }
 
 stackSize :: Int
@@ -27,16 +27,16 @@ debug :: Bool
 debug = True
 
 initialState :: IO VMState
-initialState = VMState 0 0 <$> MVec.replicate 1024 0
+initialState = VMState 0 0 <$> MVec.replicate 1024 TNil
 
 -- TODO: check for stack overflow
-push :: (MonadState VMState m, MonadIO m) => Chunk.Value -> m ()
+push :: (MonadState VMState m, MonadIO m) => Value -> m ()
 push value = do
   s <- get
   liftIO $ MVec.write (stack s) (stackTop s) value
   put s{stackTop = stackTop s + 1}
 
-pop :: (MonadState VMState m, MonadIO m) => m Chunk.Value
+pop :: (MonadState VMState m, MonadIO m) => m Value
 pop = do
   s <- get
   put (s{stackTop = stackTop s - 1})
@@ -50,7 +50,7 @@ readByte = do
   idx <- gets currentInstruction
   modifyInstruction (idx + 1) *> asks (Chunk.readWord idx)
 
-readConstant :: (MonadReader Chunk.Chunk m, MonadState VMState m) => m Chunk.Value
+readConstant :: (MonadReader Chunk.Chunk m, MonadState VMState m) => m Value
 readConstant = readByte >>= (asks . Chunk.getValue) . fromIntegral
 
 showIOVector :: (Show a) => MVec.IOVector a -> Int -> IO String
@@ -58,11 +58,43 @@ showIOVector v n = do
   elements <- traverse (fmap show . MVec.read v) [0 .. n - 1]
   pure $ "[" ++ intercalate ", " elements ++ "]"
 
-binOp :: (MonadState VMState m, MonadIO m) => (Chunk.Value -> Chunk.Value -> Chunk.Value) -> m ()
-binOp op = do
-  b <- pop
-  a <- pop
-  push (op a b)
+binOp ::
+  (MonadReader Chunk.Chunk m, MonadState VMState m, MonadError LoxError m, MonadIO m) =>
+  m a ->
+  (a -> Value) ->
+  (a -> a -> a) ->
+  m ()
+binOp consume wrap op = do
+  b <- consume
+  a <- consume
+  push . wrap $ op a b
+
+numBinOp ::
+  (MonadReader Chunk.Chunk m, MonadState VMState m, MonadError LoxError m, MonadIO m) =>
+  (Double -> Double -> Double) ->
+  m ()
+numBinOp = binOp consumeNum TNum
+
+boolBinOp ::
+  (MonadReader Chunk.Chunk m, MonadState VMState m, MonadError LoxError m, MonadIO m) =>
+  (Bool -> Bool -> Bool) ->
+  m ()
+boolBinOp = binOp consumeBool TBool
+
+unOp ::
+  (MonadReader Chunk.Chunk m, MonadState VMState m, MonadError LoxError m, MonadIO m) =>
+  m a ->
+  (a -> Value) ->
+  (a -> a) ->
+  m ()
+unOp consume wrap op = consume >>= push . wrap . op
+
+valEq :: Value -> Value -> Bool
+valEq (TNum x) (TNum y) = x == y
+valEq (TBool b1) (TBool b2) = b1 == b2
+valEq (TString s1) (TString s2) = s1 == s2
+valEq TNil TNil = True
+valEq _ _ = False
 
 interpret :: (MonadReader Chunk.Chunk m, MonadState VMState m, MonadError LoxError m, MonadIO m) => m ()
 interpret = do
@@ -74,11 +106,26 @@ interpret = do
   case op of
     Chunk.OpReturn -> pure ()
     Chunk.OpConstant -> readConstant >>= (<* interpret) . push
-    Chunk.OpNegate -> pop >>= (<* interpret) . (push . negate)
-    Chunk.OpAdd -> binOp (+) <* interpret
-    Chunk.OpSub -> binOp (-) <* interpret
-    Chunk.OpMul -> binOp (*) <* interpret
-    Chunk.OpDiv -> binOp (/) <* interpret
+    Chunk.OpNegate -> unOp consumeNum TNum negate <* interpret
+    Chunk.OpAdd -> numBinOp (+) <* interpret
+    Chunk.OpSub -> numBinOp (-) <* interpret
+    Chunk.OpMul -> numBinOp (*) <* interpret
+    Chunk.OpDiv -> numBinOp (/) <* interpret
+    Chunk.OpNot -> unOp consumeBool TBool not <* interpret
+    Chunk.OpLt -> boolBinOp (<) <* interpret
+    Chunk.OpLeq -> boolBinOp (<=) <* interpret
+    Chunk.OpGt -> boolBinOp (>) <* interpret
+    Chunk.OpGeq -> boolBinOp (>=) <* interpret
+    -- TODO: short circuit
+    Chunk.OpOr -> boolBinOp (||) <* interpret
+    Chunk.OpAnd -> boolBinOp (&&) <* interpret
+    Chunk.OpEq -> (eq >>= push . TBool) <* interpret
+    Chunk.OpNeq -> (eq >>= push . TBool . not) <* interpret
+ where
+  eq = do
+    b <- pop
+    a <- pop
+    pure (valEq a b)
 
 debugCurrentInstruction :: (MonadReader Chunk.Chunk m, MonadState VMState m, MonadIO m) => m ()
 debugCurrentInstruction = do
@@ -88,3 +135,26 @@ debugCurrentInstruction = do
 
 runProgram :: (MonadError LoxError m, MonadIO m) => Chunk.Chunk -> m ()
 runProgram chunk = liftIO initialState >>= evalStateT (runReaderT interpret chunk)
+
+consumeNum :: (MonadReader Chunk.Chunk m, MonadState VMState m, MonadError LoxError m, MonadIO m) => m Double
+consumeNum = do
+  v <- pop
+  case v of
+    TNum x -> pure x
+    _ -> do
+      idx <- gets currentInstruction
+      chunk <- ask
+      let l = Chunk.getSourcePos idx chunk
+      throwError (exprError l $ TypeError "num" v)
+
+truthyValue :: Value -> Bool
+truthyValue = \case
+  TBool b -> b
+  TNum x -> (x /= 0.0)
+  TNil -> False
+  TString s -> (not $ null s)
+  TNativeFunction _ -> True
+  TFunction{} -> True
+
+consumeBool :: (MonadState VMState m, MonadIO m) => m Bool
+consumeBool = fmap truthyValue pop

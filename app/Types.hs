@@ -23,8 +23,8 @@ import Data.Text (Text)
 import Data.Void (Void)
 import Text.Megaparsec
 
-data BinOp = Dot | Add | Sub | Mul | Div | Or | And | Eq | Neq | Lt | Leq | Gt | Geq
-  deriving (Show)
+data BinOp = Add | Sub | Mul | Div | Or | And | Eq | Neq | Lt | Leq | Gt | Geq
+  deriving (Show, Enum)
 data UnOp = Negate | Not
   deriving (Show)
 
