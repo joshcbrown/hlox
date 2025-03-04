@@ -12,7 +12,7 @@ import Environment (Env)
 import Eval (evalProgram_, evalRepl_)
 import LoxPrelude (globalEnv)
 import Opts (ExecutionMode (..), executionMode, parseOptions)
-import Parse (expr_, parseTest'', runLoxParser)
+import Parse (decl, parseTest'', runLoxParser)
 import System.Console.Haskeline
 import Types (LoxError)
 import VirtualMachine qualified as VM
@@ -40,8 +40,8 @@ repl = do
 
 executeRepl :: (MonadError LoxError m, MonadIO m) => T.Text -> m ()
 executeRepl input =
-  either throwError pure (parseTest'' expr_ input) >>= \e -> do
-    let c = Chunk.fromExpr_ e
+  either throwError pure (parseTest'' decl input) >>= \d -> do
+    let c = Chunk.fromDecl_ d
     liftIO $ disassembleChunk c
     VM.runProgram c
 

@@ -34,6 +34,10 @@ data OpCode
   | OpLeq
   | OpGt
   | OpGeq
+  | OpPop
+  | OpBindGlobal
+  | OpSetGlobal
+  | OpGetGlobal
   | OpReturn
   deriving (Enum, Show)
 
@@ -76,24 +80,32 @@ getLineNumber idx = T.unPos . T.sourceLine . (! idx) . sourceInfo
 getSourcePos :: Int -> Chunk -> T.SourcePos
 getSourcePos idx = (! idx) . sourceInfo
 
+constantInstruction :: (MonadState Int f, ?chunk :: Chunk) => Text -> Int -> OpCode -> f Text
+constantInstruction prefix idx op =
+  let valueIdx = fromIntegral $ readWord (idx + 1) ?chunk
+      value = getValue valueIdx ?chunk
+      finalString =
+        sformat
+          (stext % right 16 ' ' % " " % left 4 ' ' % " '" % stext % "'")
+          prefix
+          (pack . show $ op)
+          valueIdx
+          (valuePretty value)
+   in finalString <$ put (idx + 2)
+
 disassembleInstruction :: (MonadState Int m, ?chunk :: Chunk) => m Text
 disassembleInstruction = do
   idx <- get
   let op = fromWord . readWord idx $ ?chunk
       prefix = sformat (left 4 '0' % " " % right 4 ' ') idx (getLineNumber idx ?chunk)
+      constantInstruction' = constantInstruction prefix idx op
+      simpleInstruction = simple $ sformat (stext % stext) prefix (pack . show $ op)
   case op of
-    OpConstant ->
-      let valueIdx = fromIntegral $ readWord (idx + 1) ?chunk
-          value = getValue valueIdx ?chunk
-          finalString =
-            sformat
-              (stext % right 16 ' ' % " " % left 4 ' ' % " '" % stext % "'")
-              prefix
-              (pack . show $ op)
-              valueIdx
-              (valuePretty value)
-       in finalString <$ put (idx + 2)
-    _ -> simple $ sformat (stext % stext) prefix (pack . show $ op)
+    OpConstant -> constantInstruction'
+    OpBindGlobal -> constantInstruction'
+    OpSetGlobal -> constantInstruction'
+    OpGetGlobal -> constantInstruction'
+    _ -> simpleInstruction
 
 simple :: (MonadState Int m) => Text -> m Text
 simple t = t <$ modify (+ 1)
@@ -136,11 +148,11 @@ exChunk =
     , sourceInfo = Vec.fromList $ replicate 10 (T.SourcePos "foo" (mkPos 10) (mkPos 10))
     }
 
-fromValue :: (MonadState Word8 m) => SourcePos -> T.Value -> m Chunk
-fromValue l v = do
+constantChunk :: (MonadState Word8 m) => SourcePos -> T.Value -> OpCode -> m Chunk
+constantChunk l v op = do
   idx <- get
   modify (+ 1)
-  let code = BS.pack [toWord OpConstant, idx]
+  let code = BS.pack [toWord op, idx]
       constants = Vec.singleton v
       sourceInfo = Vec.fromList [l, l]
   pure Chunk{..}
@@ -172,6 +184,9 @@ fromOp f l op =
   let instruction = toWord . f $ op
    in Chunk (BS.singleton instruction) Vec.empty (Vec.singleton l)
 
+basic :: OpCode -> SourcePos -> Chunk
+basic op l = Chunk (BS.singleton (toWord op)) Vec.empty (Vec.singleton l)
+
 fromExpr :: (MonadState Word8 m) => T.Expr -> m Chunk
 fromExpr (T.Located l (T.BinOp op e1 e2)) = do
   c1 <- fromExpr e1
@@ -180,11 +195,19 @@ fromExpr (T.Located l (T.BinOp op e1 e2)) = do
 fromExpr (T.Located l (T.UnOp op e1)) = do
   c <- fromExpr e1
   pure (c <> fromOp fromUnOp l op)
-fromExpr (T.Located l (T.Value v)) = fromValue l v
+fromExpr (T.Located l (T.Value v)) = constantChunk l v OpConstant
+fromExpr (T.Located l (T.Ident s)) = constantChunk l (T.TString s) OpGetGlobal
+fromExpr (T.Located l (T.Assgn s e)) = (<>) <$> fromExpr e <*> constantChunk l (T.TString s) OpGetGlobal
+
+fromDecl :: (MonadState Word8 m) => T.Decl -> m Chunk
+fromDecl (T.Bind s e) =
+  let l = T.location e
+   in (<>) <$> fromExpr e <*> constantChunk l (T.TString s) OpBindGlobal
+fromDecl (T.EvalExpr e) = fmap (<> basic OpPop (T.location e)) (fromExpr e)
 
 -- TODO: remove
 terminal :: Chunk
 terminal = Chunk (BS.singleton (toWord OpReturn)) Vec.empty (Vec.singleton (SourcePos "" (mkPos 1) (mkPos 1)))
 
-fromExpr_ :: T.Expr -> Chunk
-fromExpr_ e = evalState (fromExpr e) 0 <> terminal
+fromDecl_ :: T.Decl -> Chunk
+fromDecl_ d = evalState (fromDecl d) 0 <> terminal

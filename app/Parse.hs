@@ -3,6 +3,7 @@ module Parse (
   parseTest',
   parseTest'',
   expr_,
+  decl,
 )
 where
 
@@ -75,7 +76,7 @@ parseTest' :: (Show a) => Parser a -> String -> IO ()
 parseTest' p s = parseTest (runReaderT (evalStateT p initialState) False) (T.pack s)
 
 parseTest'' :: Parser a -> T.Text -> Either LoxError a
-parseTest'' p input = mapLeft syntaxError $ runParser (runReaderT (evalStateT p initialState) True) "" input
+parseTest'' p input = mapLeft syntaxError $ runParser (runReaderT (evalStateT p initialState) False) "" input
 
 ifNeeded :: Parser () -> Parser ()
 ifNeeded p = ask >>= flip when p
@@ -93,7 +94,7 @@ symbol :: T.Text -> Parser T.Text
 symbol = L.symbol sc
 
 keyword :: T.Text -> Parser T.Text
-keyword word = symbol word <* notFollowedBy alphaNumChar
+keyword word = lexeme . try $ string word <* notFollowedBy alphaNumChar
 
 ident :: Parser String
 ident = lexeme ((:) <$> letterChar <*> many alphaNumChar)

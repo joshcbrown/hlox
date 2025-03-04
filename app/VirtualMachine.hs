@@ -1,5 +1,6 @@
 module VirtualMachine where
 
+import Chunk (Chunk)
 import Chunk qualified
 import Control.Monad (forM, forM_, when)
 import Control.Monad.Except (ExceptT, MonadError (..), runExceptT)
@@ -7,15 +8,21 @@ import Control.Monad.IO.Class (MonadIO (..))
 import Control.Monad.Reader (MonadReader (..), ReaderT, ask, asks, runReaderT)
 import Control.Monad.State (MonadState (..), StateT, evalStateT, gets, modify, put)
 import Data.ByteString qualified as BS
+import Data.IORef (IORef, newIORef, readIORef, writeIORef)
 import Data.List (intercalate)
+import Data.Map (Map)
+import Data.Map qualified as Map
 import Data.Vector qualified as Vec
 import Data.Vector.Mutable qualified as MVec
 import Data.Word (Word8)
 import Types
 
+type GlobalScope = Map String (IORef Value)
+
 data VMState = VMState
   { -- in the book, this is represented as just a ByteString, but i'm not sure that's practical...
-    currentInstruction :: Int
+    globals :: GlobalScope
+  , currentInstruction :: Int
   , stackTop :: Int
   , stack :: MVec.IOVector Value
   }
@@ -27,7 +34,7 @@ debug :: Bool
 debug = True
 
 initialState :: IO VMState
-initialState = VMState 0 0 <$> MVec.replicate 1024 TNil
+initialState = VMState Map.empty 0 0 <$> MVec.replicate 1024 TNil
 
 -- TODO: check for stack overflow
 push :: (MonadState VMState m, MonadIO m) => Value -> m ()
@@ -45,12 +52,15 @@ pop = do
 modifyInstruction :: (MonadState VMState m) => Int -> m ()
 modifyInstruction i = modify (\vm -> vm{currentInstruction = i})
 
-readByte :: (MonadReader Chunk.Chunk m, MonadState VMState m) => m Word8
+modifyGlobals :: (MonadState VMState m) => (GlobalScope -> GlobalScope) -> m ()
+modifyGlobals f = modify (\vm -> vm{globals = f (globals vm)})
+
+readByte :: (MonadReader Chunk m, MonadState VMState m) => m Word8
 readByte = do
   idx <- gets currentInstruction
   modifyInstruction (idx + 1) *> asks (Chunk.readWord idx)
 
-readConstant :: (MonadReader Chunk.Chunk m, MonadState VMState m) => m Value
+readConstant :: (MonadReader Chunk m, MonadState VMState m) => m Value
 readConstant = readByte >>= (asks . Chunk.getValue) . fromIntegral
 
 showIOVector :: (Show a) => MVec.IOVector a -> Int -> IO String
@@ -59,7 +69,7 @@ showIOVector v n = do
   pure $ "[" ++ intercalate ", " elements ++ "]"
 
 binOp ::
-  (MonadReader Chunk.Chunk m, MonadState VMState m, MonadError LoxError m, MonadIO m) =>
+  (MonadReader Chunk m, MonadState VMState m, MonadError LoxError m, MonadIO m) =>
   m a ->
   (a -> Value) ->
   (a -> a -> a) ->
@@ -70,19 +80,19 @@ binOp consume wrap op = do
   push . wrap $ op a b
 
 numBinOp ::
-  (MonadReader Chunk.Chunk m, MonadState VMState m, MonadError LoxError m, MonadIO m) =>
+  (MonadReader Chunk m, MonadState VMState m, MonadError LoxError m, MonadIO m) =>
   (Double -> Double -> Double) ->
   m ()
 numBinOp = binOp consumeNum TNum
 
 boolBinOp ::
-  (MonadReader Chunk.Chunk m, MonadState VMState m, MonadError LoxError m, MonadIO m) =>
+  (MonadReader Chunk m, MonadState VMState m, MonadError LoxError m, MonadIO m) =>
   (Bool -> Bool -> Bool) ->
   m ()
 boolBinOp = binOp consumeBool TBool
 
 unOp ::
-  (MonadReader Chunk.Chunk m, MonadState VMState m, MonadError LoxError m, MonadIO m) =>
+  (MonadReader Chunk m, MonadState VMState m, MonadError LoxError m, MonadIO m) =>
   m a ->
   (a -> Value) ->
   (a -> a) ->
@@ -96,7 +106,7 @@ valEq (TString s1) (TString s2) = s1 == s2
 valEq TNil TNil = True
 valEq _ _ = False
 
-interpret :: (MonadReader Chunk.Chunk m, MonadState VMState m, MonadError LoxError m, MonadIO m) => m ()
+interpret :: (MonadReader Chunk m, MonadState VMState m, MonadError LoxError m, MonadIO m) => m ()
 interpret = do
   when debug $ do
     s <- get
@@ -121,22 +131,54 @@ interpret = do
     Chunk.OpAnd -> boolBinOp (&&) <* interpret
     Chunk.OpEq -> (eq >>= push . TBool) <* interpret
     Chunk.OpNeq -> (eq >>= push . TBool . not) <* interpret
+    Chunk.OpPop -> pop *> interpret
+    Chunk.OpBindGlobal -> do
+      v <- pop
+      ident <- getStringConstant
+      ref <- liftIO $ newIORef v
+      modifyGlobals (Map.insert ident ref)
+      interpret
+    Chunk.OpSetGlobal -> do
+      v <- pop
+      ref <- getGlobalRef =<< getStringConstant
+      liftIO $ writeIORef ref v
+      interpret
+    Chunk.OpGetGlobal -> do
+      ref <- getGlobalRef =<< getStringConstant
+      liftIO (readIORef ref) >>= push
+      interpret
  where
+  -- Chunk
+
   eq = do
     b <- pop
     a <- pop
     pure (valEq a b)
 
-debugCurrentInstruction :: (MonadReader Chunk.Chunk m, MonadState VMState m, MonadIO m) => m ()
+debugCurrentInstruction :: (MonadReader Chunk m, MonadState VMState m, MonadIO m) => m ()
 debugCurrentInstruction = do
   idx <- gets currentInstruction
   chunk <- ask
   liftIO $ Chunk.disassembleInstruction_ idx chunk
 
-runProgram :: (MonadError LoxError m, MonadIO m) => Chunk.Chunk -> m ()
+runProgram :: (MonadError LoxError m, MonadIO m) => Chunk -> m ()
 runProgram chunk = liftIO initialState >>= evalStateT (runReaderT interpret chunk)
 
-consumeNum :: (MonadReader Chunk.Chunk m, MonadState VMState m, MonadError LoxError m, MonadIO m) => m Double
+throwExprError :: (MonadError LoxError m, MonadState VMState m, MonadReader Chunk m) => ExprError_ -> m a
+throwExprError err = do
+  idx <- gets currentInstruction
+  chunk <- ask
+  let l = Chunk.getSourcePos idx chunk
+  throwError (exprError l err)
+
+getGlobalRef :: (MonadState VMState m, MonadError LoxError m, MonadReader Chunk m) => String -> m (IORef Value)
+getGlobalRef ident = do
+  curGlobals <- gets globals
+  case Map.lookup ident curGlobals of
+    Nothing -> throwExprError $ NotInScope ident
+    Just ref -> pure ref
+
+consumeNum :: (MonadReader Chunk m, MonadState VMState m, MonadError LoxError m, MonadIO m) => m Double
 consumeNum = do
   v <- pop
   case v of
@@ -158,3 +200,9 @@ truthyValue = \case
 
 consumeBool :: (MonadState VMState m, MonadIO m) => m Bool
 consumeBool = fmap truthyValue pop
+
+getStringConstant :: (MonadState VMState m, MonadReader Chunk m) => m String
+getStringConstant =
+  readConstant >>= \case
+    TString ident -> pure ident
+    _ -> undefined
