@@ -205,9 +205,5 @@ fromDecl (T.Bind s e) =
    in (<>) <$> fromExpr e <*> constantChunk l (T.TString s) OpBindGlobal
 fromDecl (T.EvalExpr e) = fmap (<> basic OpPop (T.location e)) (fromExpr e)
 
--- TODO: remove
-terminal :: Chunk
-terminal = Chunk (BS.singleton (toWord OpReturn)) Vec.empty (Vec.singleton (SourcePos "" (mkPos 1) (mkPos 1)))
-
 fromDecl_ :: T.Decl -> Chunk
-fromDecl_ d = evalState (fromDecl d) 0 <> terminal
+fromDecl_ d = evalState (fromDecl d) 0

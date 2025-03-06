@@ -25,7 +25,7 @@ runRepl = VM.initialState >>= evalStateT (runInputT settings repl)
       { historyFile = Just ".lox_history"
       }
 
-repl :: (MonadIO m, MonadMask m) => InputT m ()
+repl :: (MonadIO m, MonadMask m, MonadState VM.VMState m) => InputT m ()
 repl = do
   minput <- getInputLine "lox> "
   case minput of
@@ -38,12 +38,13 @@ repl = do
         _ -> pure ()
       repl
 
-executeRepl :: (MonadError LoxError m, MonadIO m) => T.Text -> m ()
+executeRepl :: (MonadError LoxError m, MonadIO m, MonadState VM.VMState m) => T.Text -> m ()
 executeRepl input =
   either throwError pure (parseTest'' decl input) >>= \d -> do
     let c = Chunk.fromDecl_ d
     liftIO $ disassembleChunk c
     VM.runProgram c
+    VM.resetVM
 
 executeProgram :: (MonadState Env m, MonadError LoxError m, MonadIO m) => T.Text -> m ()
 executeProgram input = either throwError pure (runLoxParser True "" input) >>= evalProgram_
