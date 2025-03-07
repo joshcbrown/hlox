@@ -1,16 +1,26 @@
 {-# LANGUAGE RecordWildCards #-}
+{-# OPTIONS_GHC -Wno-unrecognised-pragmas #-}
+
+{-# HLINT ignore "Redundant <$>" #-}
 
 module Chunk where
 
 import Control.Monad
+import Control.Monad.Except (ExceptT, MonadError (..), runExceptT)
+import Control.Monad.ST
 import Control.Monad.State
 import Control.Monad.Writer
+import Data.Bool (bool)
 import Data.ByteString qualified as BS
 import Data.Foldable
+import Data.List (find, findIndex)
+import Data.Maybe (isNothing)
 import Data.Text (Text, pack)
 import Data.Text.IO qualified as TIO
 import Data.Vector ((!))
 import Data.Vector qualified as Vec
+import Data.Vector.Mutable (STVector)
+import Data.Vector.Mutable qualified as MVec
 import Data.Word (Word8)
 import Formatting
 import GHC.ExecutionStack (Location (functionName))
@@ -35,6 +45,8 @@ data OpCode
   | OpGt
   | OpGeq
   | OpPop
+  | OpSetLocal
+  | OpGetLocal
   | OpBindGlobal
   | OpSetGlobal
   | OpGetGlobal
@@ -53,6 +65,20 @@ instance Semigroup Chunk where
 
 instance Monoid Chunk where
   mempty = Chunk{code = BS.empty, constants = Vec.empty, sourceInfo = Vec.empty}
+
+data Local = Local
+  { name :: String
+  , depth :: Maybe Int
+  }
+
+data CompilerState = CompilerState
+  { constantCount :: Word8
+  , scopeDepth :: Int
+  , localCounts :: [Int]
+  , locals :: [Local]
+  }
+
+type Compiler = ExceptT T.LoxError (State CompilerState)
 
 valuePretty :: T.Value -> Text
 valuePretty (T.TNum x) = sformat (fixed 2) x
@@ -80,31 +106,45 @@ getLineNumber idx = T.unPos . T.sourceLine . (! idx) . sourceInfo
 getSourcePos :: Int -> Chunk -> T.SourcePos
 getSourcePos idx = (! idx) . sourceInfo
 
-constantInstruction :: (MonadState Int f, ?chunk :: Chunk) => Text -> Int -> OpCode -> f Text
+instructionWithMeta :: (?chunk :: Chunk) => Text -> OpCode -> Text -> Text
+instructionWithMeta prefix op =
+  sformat
+    (stext % right 16 ' ' % " " % stext)
+    prefix
+    (pack . show $ op)
+
+constantInstruction :: (?chunk :: Chunk) => Text -> Int -> OpCode -> Text
 constantInstruction prefix idx op =
   let valueIdx = fromIntegral $ readWord (idx + 1) ?chunk
       value = getValue valueIdx ?chunk
-      finalString =
+      meta =
         sformat
-          (stext % right 16 ' ' % " " % left 4 ' ' % " '" % stext % "'")
-          prefix
-          (pack . show $ op)
+          (left 4 ' ' % " '" % stext % "'")
           valueIdx
           (valuePretty value)
-   in finalString <$ put (idx + 2)
+   in instructionWithMeta prefix op meta
+
+localInstruction :: (?chunk :: Chunk) => Text -> Int -> OpCode -> Text
+localInstruction prefix idx op =
+  let offset = readWord (idx + 1) ?chunk
+      meta = sformat (left 4 ' ') offset
+   in instructionWithMeta prefix op meta
 
 disassembleInstruction :: (MonadState Int m, ?chunk :: Chunk) => m Text
 disassembleInstruction = do
   idx <- get
   let op = fromWord . readWord idx $ ?chunk
       prefix = sformat (left 4 '0' % " " % right 4 ' ') idx (getLineNumber idx ?chunk)
-      constantInstruction' = constantInstruction prefix idx op
+      constantInstruction' = constantInstruction prefix idx op <$ put (idx + 2)
+      localInstruction' = localInstruction prefix idx op <$ put (idx + 2)
       simpleInstruction = simple $ sformat (stext % stext) prefix (pack . show $ op)
   case op of
     OpConstant -> constantInstruction'
     OpBindGlobal -> constantInstruction'
     OpSetGlobal -> constantInstruction'
     OpGetGlobal -> constantInstruction'
+    OpSetLocal -> localInstruction'
+    OpGetLocal -> localInstruction'
     _ -> simpleInstruction
 
 simple :: (MonadState Int m) => Text -> m Text
@@ -128,30 +168,17 @@ disassembleLoop = do
     tell [result]
     disassembleLoop
 
-exChunk :: Chunk
-exChunk =
-  Chunk
-    { code =
-        BS.pack
-          [ toWord OpConstant
-          , 0
-          , toWord OpConstant
-          , 1
-          , toWord OpAdd
-          , toWord OpConstant
-          , 2
-          , toWord OpDiv
-          , toWord OpNegate
-          , toWord OpReturn
-          ]
-    , constants = Vec.fromList [T.TNum 1.2, T.TNum 3.4, T.TNum 5.6]
-    , sourceInfo = Vec.fromList $ replicate 10 (T.SourcePos "foo" (mkPos 10) (mkPos 10))
-    }
+chunkWithOperand :: SourcePos -> OpCode -> Word8 -> Chunk
+chunkWithOperand l instruction operand =
+  let code = BS.pack [toWord instruction, operand]
+      constants = Vec.empty
+      sourceInfo = Vec.fromList [l, l]
+   in Chunk{..}
 
-constantChunk :: (MonadState Word8 m) => SourcePos -> T.Value -> OpCode -> m Chunk
+constantChunk :: SourcePos -> T.Value -> OpCode -> Compiler Chunk
 constantChunk l v op = do
-  idx <- get
-  modify (+ 1)
+  idx <- gets constantCount
+  modify (\c -> c{constantCount = idx + 1})
   let code = BS.pack [toWord op, idx]
       constants = Vec.singleton v
       sourceInfo = Vec.fromList [l, l]
@@ -187,7 +214,62 @@ fromOp f l op =
 basic :: OpCode -> SourcePos -> Chunk
 basic op l = Chunk (BS.singleton (toWord op)) Vec.empty (Vec.singleton l)
 
-fromExpr :: (MonadState Word8 m) => T.Expr -> m Chunk
+defaultSourcePos :: SourcePos
+defaultSourcePos = SourcePos "" (mkPos 1) (mkPos 1)
+
+inNewScope :: Compiler Chunk -> Compiler Chunk
+inNewScope m = do
+  modify (\c -> c{scopeDepth = scopeDepth c + 1, localCounts = 0 : localCounts c})
+  body <- m
+  nLocals <- gets (head . localCounts)
+  modify (\c -> c{scopeDepth = scopeDepth c - 1, localCounts = tail (localCounts c)})
+  pure $ body <> mconcat (replicate nLocals (basic OpPop defaultSourcePos))
+
+whenM :: (Monad m) => m Bool -> m () -> m ()
+whenM mb m = mb >>= flip when m
+
+checkNotInScope :: String -> Compiler ()
+checkNotInScope n = do
+  ls <- gets locals
+  case find ((== n) . name) ls of
+    Just local ->
+      whenM (gets ((depth local ==) . Just . scopeDepth)) $
+        throwError (T.compilerError defaultSourcePos (T.Shadowing n))
+    Nothing -> pure ()
+
+declareLocal :: String -> Compiler Int
+declareLocal name = do
+  checkNotInScope name
+  modify
+    ( \c ->
+        c
+          { locals = Local name Nothing : locals c
+          , localCounts = (head (localCounts c) + 1) : tail (localCounts c)
+          }
+    )
+  gets (length . locals)
+
+defineLocal :: Compiler ()
+defineLocal = do
+  ls <- gets locals
+  modify (\c -> c{locals = (head ls){depth = Just (scopeDepth c)} : tail ls})
+
+resolveLocal :: String -> Compiler (Maybe Int)
+resolveLocal n = do
+  ls <- gets locals
+  let res = resolve ls
+  -- there's gotta be a better way
+  case res of
+    Nothing -> pure Nothing
+    Just idx ->
+      if isNothing (depth (ls !! idx))
+        then
+          throwError $ T.compilerError defaultSourcePos (T.SelfRefInDecl n)
+        else pure (Just idx)
+ where
+  resolve ls = (length ls - 1 -) <$> findIndex ((== n) . name) ls
+
+fromExpr :: T.Expr -> Compiler Chunk
 fromExpr (T.Located l (T.BinOp op e1 e2)) = do
   c1 <- fromExpr e1
   c2 <- fromExpr e2
@@ -196,14 +278,32 @@ fromExpr (T.Located l (T.UnOp op e1)) = do
   c <- fromExpr e1
   pure (c <> fromOp fromUnOp l op)
 fromExpr (T.Located l (T.Value v)) = constantChunk l v OpConstant
-fromExpr (T.Located l (T.Ident s)) = constantChunk l (T.TString s) OpGetGlobal
-fromExpr (T.Located l (T.Assgn s e)) = (<>) <$> fromExpr e <*> constantChunk l (T.TString s) OpGetGlobal
+fromExpr (T.Located l (T.Ident s)) =
+  resolveLocal s
+    >>= \case
+      Just offset -> pure $ chunkWithOperand l OpGetLocal (fromIntegral offset)
+      Nothing -> constantChunk l (T.TString s) OpGetGlobal
+fromExpr (T.Located l (T.Assgn s e)) =
+  (<>)
+    <$> fromExpr e
+    <*> ( resolveLocal s
+            >>= \case
+              Just offset -> pure $ chunkWithOperand l OpSetLocal (fromIntegral offset)
+              Nothing -> constantChunk l (T.TString s) OpSetGlobal
+        )
 
-fromDecl :: (MonadState Word8 m) => T.Decl -> m Chunk
+fromDecl :: T.Decl -> Compiler Chunk
 fromDecl (T.Bind s e) =
-  let l = T.location e
-   in (<>) <$> fromExpr e <*> constantChunk l (T.TString s) OpBindGlobal
+  gets scopeDepth
+    >>= \case
+      0 ->
+        liftM2 (<>) (fromExpr e) (constantChunk (T.location e) (T.TString s) OpBindGlobal)
+      _ -> do
+        offset <- declareLocal s
+        c <- fromExpr e
+        (c <> chunkWithOperand (T.location e) OpSetLocal (fromIntegral offset))
+          <$ defineLocal
 fromDecl (T.EvalExpr e) = fmap (<> basic OpPop (T.location e)) (fromExpr e)
 
-fromDecl_ :: T.Decl -> Chunk
-fromDecl_ d = evalState (fromDecl d) 0
+fromDecl_ :: T.Decl -> Either T.LoxError Chunk
+fromDecl_ d = evalState (runExceptT (fromDecl d)) (CompilerState 0 0 [] [])

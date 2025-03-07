@@ -11,7 +11,9 @@ module Types (
   Decl (..),
   Program,
   ExprError_ (..),
+  CompileError_ (..),
   NativeFunction,
+  compilerError,
   exprError,
   syntaxError,
   showValuePretty,
@@ -81,11 +83,12 @@ showValuePretty TNil = "nil"
 showValuePretty (TNativeFunction _) = "<native function>"
 showValuePretty (TFunction name _ _) = "<function " ++ name ++ ">"
 
-data LoxError = SyntaxError (ParseErrorBundle Text Void) | RuntimeError ExprError
+data LoxError = SyntaxError (ParseErrorBundle Text Void) | CompilerError CompilerError | RuntimeError ExprError
 
 instance Show LoxError where
   show (SyntaxError b) = "syntax error:\n" <> errorBundlePretty b
   show (RuntimeError e) = "runtime error:\n" <> show e
+  show (CompilerError e) = "compile time error:\n" <> show e
 
 data ExprError_
   = TypeError
@@ -104,6 +107,16 @@ data ExprError_
       , expectedArity :: Int
       , gotArity :: Int
       }
+
+data CompileError_
+  = Shadowing String
+  | SelfRefInDecl String
+  deriving (Show)
+
+type CompilerError = Located CompileError_
+
+compilerError :: SourcePos -> CompileError_ -> LoxError
+compilerError l e = CompilerError $ Located l e
 
 instance Show ExprError_ where
   show (TypeError expected got) = "expected " ++ expected ++ ", got " ++ show got

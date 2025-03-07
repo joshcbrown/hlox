@@ -2,7 +2,7 @@ module Main where
 
 import Chunk
 import Control.Monad.Catch (MonadMask)
-import Control.Monad.Except (MonadError (..), runExceptT)
+import Control.Monad.Except (MonadError (..), liftEither, runExceptT)
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Control.Monad.State (MonadState, MonadTrans (lift), evalStateT)
 import Data.ByteString qualified as BS
@@ -40,8 +40,8 @@ repl = do
 
 executeRepl :: (MonadError LoxError m, MonadIO m, MonadState VM.VMState m) => T.Text -> m ()
 executeRepl input =
-  either throwError pure (parseTest'' decl input) >>= \d -> do
-    let c = Chunk.fromDecl_ d
+  liftEither (parseTest'' decl input) >>= \d -> do
+    c <- liftEither $ Chunk.fromDecl_ d
     liftIO $ disassembleChunk c
     VM.runProgram c
     VM.resetVM

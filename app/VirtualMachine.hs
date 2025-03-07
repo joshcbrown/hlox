@@ -124,6 +124,14 @@ whenJust m f =
     Just a -> f a
     Nothing -> pure ()
 
+writeToStack :: (MonadState VMState m, MonadIO m) => Int -> Value -> m ()
+writeToStack idx value = do
+  v <- gets stack
+  liftIO $ MVec.write v idx value
+
+readFromStack :: (MonadState VMState m, MonadIO m) => Int -> m Value
+readFromStack idx = gets stack >>= liftIO . flip MVec.read idx
+
 interpret :: (MonadReader Chunk m, MonadState VMState m, MonadError LoxError m, MonadIO m) => m ()
 interpret = do
   when debug $ do
@@ -163,10 +171,15 @@ interpret = do
         Chunk.OpGetGlobal -> do
           ref <- getGlobalRef =<< getStringConstant
           liftIO (readIORef ref) >>= push
+        Chunk.OpSetLocal -> do
+          v <- pop
+          offset <- fromIntegral . fromJust <$> readByte
+          writeToStack offset v
+        Chunk.OpGetLocal -> do
+          offset <- fromIntegral . fromJust <$> readByte
+          readFromStack offset >>= push
       interpret
  where
-  -- Chunk
-
   eq = do
     b <- pop
     a <- pop
