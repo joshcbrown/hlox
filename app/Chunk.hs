@@ -10,6 +10,7 @@ import Control.Monad.Except (ExceptT, MonadError (..), runExceptT)
 import Control.Monad.ST
 import Control.Monad.State
 import Control.Monad.Writer
+import Data.Bits (shiftL, shiftR)
 import Data.Bool (bool)
 import Data.ByteString qualified as BS
 import Data.Foldable
@@ -21,7 +22,7 @@ import Data.Vector ((!))
 import Data.Vector qualified as Vec
 import Data.Vector.Mutable (STVector)
 import Data.Vector.Mutable qualified as MVec
-import Data.Word (Word8)
+import Data.Word (Word16, Word8)
 import Formatting
 import GHC.ExecutionStack (Location (functionName))
 import Parse
@@ -44,6 +45,8 @@ data OpCode
   | OpLeq
   | OpGt
   | OpGeq
+  | OpJumpIfFalse
+  | OpJump
   | OpPop
   | OpSetLocal
   | OpGetLocal
@@ -71,6 +74,8 @@ data Local = Local
   , depth :: Maybe Int
   }
 
+-- TODO: replace with more haskell-y solution. scopeDepth and localCounts are totally unnecessary,
+-- can be replaced with locals :: [Map String Int]
 data CompilerState = CompilerState
   { constantCount :: Word8
   , scopeDepth :: Int
@@ -96,6 +101,15 @@ fromWord = toEnum . fromIntegral
 
 readWord :: Int -> Chunk -> Word8
 readWord idx = (`BS.index` idx) . code
+
+readWord16 :: Int -> Chunk -> Word16
+readWord16 idx chunk =
+  let
+    c = code chunk
+    b1 = BS.index c idx
+    b2 = BS.index c (idx + 1)
+   in
+    (fromIntegral b1 `shiftL` 8) + fromIntegral b2
 
 getValue :: Int -> Chunk -> T.Value
 getValue idx = (! idx) . constants
@@ -130,13 +144,21 @@ localInstruction prefix idx op =
       meta = sformat (left 4 ' ') offset
    in instructionWithMeta prefix op meta
 
+jumpInstruction :: (?chunk :: Chunk) => Text -> Int -> Bool -> OpCode -> Text
+jumpInstruction prefix idx positive op =
+  let jump = fromIntegral $ readWord16 (idx + 1) ?chunk
+      sign = bool (-1) 1 positive
+      meta = sformat (left 4 ' ' % " -> " % int) idx (idx + 3 + sign * jump)
+   in instructionWithMeta prefix op meta
+
 disassembleInstruction :: (MonadState Int m, ?chunk :: Chunk) => m Text
 disassembleInstruction = do
   idx <- get
   let op = fromWord . readWord idx $ ?chunk
-      prefix = sformat (left 4 '0' % " " % right 4 ' ') idx (getLineNumber idx ?chunk)
+      prefix = sformat (left 4 '0' %+ right 4 ' ') idx (getLineNumber idx ?chunk)
       constantInstruction' = constantInstruction prefix idx op <$ put (idx + 2)
       localInstruction' = localInstruction prefix idx op <$ put (idx + 2)
+      jumpInstruction' = jumpInstruction prefix idx True op <$ put (idx + 3)
       simpleInstruction = simple $ sformat (stext % stext) prefix (pack . show $ op)
   case op of
     OpConstant -> constantInstruction'
@@ -145,6 +167,8 @@ disassembleInstruction = do
     OpGetGlobal -> constantInstruction'
     OpSetLocal -> localInstruction'
     OpGetLocal -> localInstruction'
+    OpJumpIfFalse -> jumpInstruction'
+    OpJump -> jumpInstruction'
     _ -> simpleInstruction
 
 simple :: (MonadState Int m) => Text -> m Text
@@ -173,6 +197,13 @@ chunkWithOperand l instruction operand =
   let code = BS.pack [toWord instruction, operand]
       constants = Vec.empty
       sourceInfo = Vec.fromList [l, l]
+   in Chunk{..}
+
+jumpChunk :: SourcePos -> OpCode -> Word16 -> Chunk
+jumpChunk l instruction operand =
+  let code = BS.pack [toWord instruction, fromIntegral $ operand `shiftR` 8, fromIntegral operand]
+      constants = Vec.empty
+      sourceInfo = Vec.fromList [l, l, l]
    in Chunk{..}
 
 constantChunk :: SourcePos -> T.Value -> OpCode -> Compiler Chunk
@@ -247,7 +278,7 @@ declareLocal name = do
           , localCounts = (head (localCounts c) + 1) : tail (localCounts c)
           }
     )
-  gets (length . locals)
+  gets (subtract 1 . length . locals)
 
 defineLocal :: Compiler ()
 defineLocal = do
@@ -304,6 +335,32 @@ fromDecl (T.Bind s e) =
         (c <> chunkWithOperand (T.location e) OpSetLocal (fromIntegral offset))
           <$ defineLocal
 fromDecl (T.EvalExpr e) = fmap (<> basic OpPop (T.location e)) (fromExpr e)
+fromDecl (T.If cond trueBody falseBody) = do
+  condChunk <- fromExpr cond
+  trueChunk <- inNewScope $ fromProgram trueBody
+  falseChunk <- case falseBody of
+    Just body -> inNewScope $ fromProgram body
+    Nothing -> pure mempty
+  let popChunk = basic OpPop (T.location cond)
+      -- extra 1 byte at start for pop instruction,
+      -- 3 bytes at end for jump past false body
+      trueJumpLength = 1 + (fromIntegral . BS.length . code $ trueChunk) + 3
+      trueJumpChunk = jumpChunk (T.location cond) OpJumpIfFalse trueJumpLength
+      -- extra 1 byte at start for pop instruction
+      falseJumpLength = 1 + (fromIntegral . BS.length . code $ falseChunk)
+      falseJumpChunk = jumpChunk (T.location cond) OpJump falseJumpLength
+  pure . mconcat $
+    [ condChunk
+    , trueJumpChunk
+    , popChunk
+    , trueChunk
+    , falseJumpChunk
+    , popChunk
+    , falseChunk
+    ]
+
+fromProgram :: T.Program -> Compiler Chunk
+fromProgram = fmap mconcat . traverse fromDecl
 
 fromDecl_ :: T.Decl -> Either T.LoxError Chunk
 fromDecl_ d = evalState (runExceptT (fromDecl d)) (CompilerState 0 0 [] [])

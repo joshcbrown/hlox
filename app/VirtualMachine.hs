@@ -2,7 +2,7 @@ module VirtualMachine where
 
 import Chunk (Chunk)
 import Chunk qualified
-import Control.Monad (forM, forM_, void, when)
+import Control.Monad (forM, forM_, unless, void, when)
 import Control.Monad.Except (ExceptT, MonadError (..), runExceptT)
 import Control.Monad.IO.Class (MonadIO (..))
 import Control.Monad.Reader (MonadReader (..), ReaderT, ask, asks, runReaderT)
@@ -15,7 +15,7 @@ import Data.Map qualified as Map
 import Data.Maybe (fromJust)
 import Data.Vector qualified as Vec
 import Data.Vector.Mutable qualified as MVec
-import Data.Word (Word8)
+import Data.Word (Word16, Word8)
 import Types
 
 type GlobalScope = Map String (IORef Value)
@@ -37,7 +37,11 @@ debug = True
 initialState :: IO VMState
 initialState = VMState Map.empty 0 0 <$> MVec.replicate 1024 TNil
 
--- TODO: check for stack overflow
+peek :: (MonadState VMState m, MonadIO m) => m Value
+peek = do
+  s <- get
+  liftIO $ MVec.read (stack s) (stackTop s - 1)
+
 push :: (MonadState VMState m, MonadIO m) => Value -> m ()
 push value = do
   s <- get
@@ -60,20 +64,23 @@ modifyGlobals f = modify (\vm -> vm{globals = f (globals vm)})
 resetVM :: (MonadState VMState m) => m ()
 resetVM = modify (\vm -> vm{currentInstruction = 0, stackTop = 0})
 
-peekByte :: (MonadReader Chunk m, MonadState VMState m) => m (Maybe Word8)
-peekByte = do
+safely :: (MonadReader Chunk m, MonadState VMState m) => (Int -> m a) -> m (Maybe a)
+safely f = do
   idx <- gets currentInstruction
   len <- asks (BS.length . Chunk.code)
   if idx < len
     then
-      asks (Just . Chunk.readWord idx)
+      Just <$> f idx
     else pure Nothing
 
-readByte :: (MonadReader Chunk m, MonadState VMState m) => m (Maybe Word8)
-readByte = peekByte <* modifyInstruction (+ 1)
+readWord :: (MonadReader Chunk m, MonadState VMState m) => m (Maybe Word8)
+readWord = safely (asks . Chunk.readWord) <* modifyInstruction (+ 1)
+
+readWord16 :: (MonadReader Chunk m, MonadState VMState m) => m (Maybe Word16)
+readWord16 = safely (asks . Chunk.readWord16) <* modifyInstruction (+ 2)
 
 readConstant :: (MonadReader Chunk m, MonadState VMState m) => m Value
-readConstant = readByte >>= (asks . Chunk.getValue) . fromIntegral . fromJust
+readConstant = readWord >>= (asks . Chunk.getValue) . fromIntegral . fromJust
 
 showIOVector :: (Show a) => MVec.IOVector a -> Int -> IO String
 showIOVector v n = do
@@ -132,13 +139,16 @@ writeToStack idx value = do
 readFromStack :: (MonadState VMState m, MonadIO m) => Int -> m Value
 readFromStack idx = gets stack >>= liftIO . flip MVec.read idx
 
+jump :: (MonadReader Chunk m, MonadState VMState m) => m ()
+jump = readWord16 >>= (\jl -> modifyInstruction (+ jl)) . fromIntegral . fromJust
+
 interpret :: (MonadReader Chunk m, MonadState VMState m, MonadError LoxError m, MonadIO m) => m ()
 interpret = do
   when debug $ do
     s <- get
     liftIO (showIOVector (stack s) (stackTop s) >>= putStrLn)
     debugCurrentInstruction
-  whenJust readByte $
+  whenJust readWord $
     \op -> do
       case Chunk.fromWord op of
         Chunk.OpReturn -> pure ()
@@ -173,11 +183,15 @@ interpret = do
           liftIO (readIORef ref) >>= push
         Chunk.OpSetLocal -> do
           v <- pop
-          offset <- fromIntegral . fromJust <$> readByte
+          offset <- fromIntegral . fromJust <$> readWord
           writeToStack offset v
         Chunk.OpGetLocal -> do
-          offset <- fromIntegral . fromJust <$> readByte
+          offset <- fromIntegral . fromJust <$> readWord
           readFromStack offset >>= push
+        Chunk.OpJumpIfFalse -> do
+          b <- truthyValue <$> peek
+          if b then void readWord16 else jump
+        Chunk.OpJump -> jump
       interpret
  where
   eq = do
