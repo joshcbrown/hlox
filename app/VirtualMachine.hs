@@ -191,6 +191,9 @@ interpret = do
         Chunk.OpJumpIfFalse -> do
           b <- truthyValue <$> peek
           if b then void readWord16 else jump
+        Chunk.OpJumpIfTrue -> do
+          b <- truthyValue <$> peek
+          if b then jump else void readWord16
         Chunk.OpJump -> jump
       interpret
  where

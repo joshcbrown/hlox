@@ -46,6 +46,7 @@ data OpCode
   | OpGt
   | OpGeq
   | OpJumpIfFalse
+  | OpJumpIfTrue
   | OpJump
   | OpPop
   | OpSetLocal
@@ -168,6 +169,7 @@ disassembleInstruction = do
     OpSetLocal -> localInstruction'
     OpGetLocal -> localInstruction'
     OpJumpIfFalse -> jumpInstruction'
+    OpJumpIfTrue -> jumpInstruction'
     OpJump -> jumpInstruction'
     _ -> simpleInstruction
 
@@ -238,9 +240,7 @@ fromUnOp = \case
   T.Not -> OpNot
 
 fromOp :: (op -> OpCode) -> SourcePos -> op -> Chunk
-fromOp f l op =
-  let instruction = toWord . f $ op
-   in Chunk (BS.singleton instruction) Vec.empty (Vec.singleton l)
+fromOp f l op = basic (f op) l
 
 basic :: OpCode -> SourcePos -> Chunk
 basic op l = Chunk (BS.singleton (toWord op)) Vec.empty (Vec.singleton l)
@@ -304,7 +304,15 @@ fromExpr :: T.Expr -> Compiler Chunk
 fromExpr (T.Located l (T.BinOp op e1 e2)) = do
   c1 <- fromExpr e1
   c2 <- fromExpr e2
-  pure (c1 <> c2 <> fromOp fromBinOp l op)
+  let
+    -- short circuit stuff
+    -- 1 extra byte for pop instruction
+    jumpLength = 1 + (fromIntegral . BS.length . code $ c2)
+    popChunk = basic OpPop l
+  pure $ case op of
+    T.And -> c1 <> jumpChunk l OpJumpIfFalse jumpLength <> popChunk <> c2
+    T.Or -> c1 <> jumpChunk l OpJumpIfTrue jumpLength <> popChunk <> c2
+    _ -> c1 <> c2 <> fromOp fromBinOp l op
 fromExpr (T.Located l (T.UnOp op e1)) = do
   c <- fromExpr e1
   pure (c <> fromOp fromUnOp l op)
@@ -351,13 +359,13 @@ fromDecl (T.If cond trueBody falseBody) = do
       falseJumpChunk = jumpChunk (T.location cond) OpJump falseJumpLength
   pure . mconcat $
     [ condChunk
-    , trueJumpChunk
-    , popChunk
-    , trueChunk
-    , falseJumpChunk
-    , popChunk
-    , falseChunk
-    ]
+    , trueJumpChunk -- ──┐
+    , popChunk --        │
+    , trueChunk --       │
+    , falseJumpChunk -- ─┼┐
+    , popChunk -- ◄──────┘│
+    , falseChunk --       │
+    ] --  ◄───────────────┘
 
 fromProgram :: T.Program -> Compiler Chunk
 fromProgram = fmap mconcat . traverse fromDecl
