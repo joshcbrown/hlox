@@ -48,6 +48,7 @@ data OpCode
   | OpJumpIfFalse
   | OpJumpIfTrue
   | OpJump
+  | OpIncrStack
   | OpPop
   | OpSetLocal
   | OpGetLocal
@@ -55,6 +56,7 @@ data OpCode
   | OpSetGlobal
   | OpGetGlobal
   | OpReturn
+  | OpLoop
   deriving (Enum, Show)
 
 data Chunk = Chunk
@@ -112,6 +114,9 @@ readWord16 idx chunk =
    in
     (fromIntegral b1 `shiftL` 8) + fromIntegral b2
 
+jumpLength :: Chunk -> Word16
+jumpLength = fromIntegral . BS.length . code
+
 getValue :: Int -> Chunk -> T.Value
 getValue idx = (! idx) . constants
 
@@ -159,7 +164,7 @@ disassembleInstruction = do
       prefix = sformat (left 4 '0' %+ right 4 ' ') idx (getLineNumber idx ?chunk)
       constantInstruction' = constantInstruction prefix idx op <$ put (idx + 2)
       localInstruction' = localInstruction prefix idx op <$ put (idx + 2)
-      jumpInstruction' = jumpInstruction prefix idx True op <$ put (idx + 3)
+      jumpInstruction' pos = jumpInstruction prefix idx pos op <$ put (idx + 3)
       simpleInstruction = simple $ sformat (stext % stext) prefix (pack . show $ op)
   case op of
     OpConstant -> constantInstruction'
@@ -168,9 +173,10 @@ disassembleInstruction = do
     OpGetGlobal -> constantInstruction'
     OpSetLocal -> localInstruction'
     OpGetLocal -> localInstruction'
-    OpJumpIfFalse -> jumpInstruction'
-    OpJumpIfTrue -> jumpInstruction'
-    OpJump -> jumpInstruction'
+    OpJumpIfFalse -> jumpInstruction' True
+    OpJumpIfTrue -> jumpInstruction' True
+    OpJump -> jumpInstruction' True
+    OpLoop -> jumpInstruction' False
     _ -> simpleInstruction
 
 simple :: (MonadState Int m) => Text -> m Text
@@ -254,7 +260,10 @@ inNewScope m = do
   body <- m
   nLocals <- gets (head . localCounts)
   modify (\c -> c{scopeDepth = scopeDepth c - 1, localCounts = tail (localCounts c)})
-  pure $ body <> mconcat (replicate nLocals (basic OpPop defaultSourcePos))
+  pure $
+    mconcat (replicate nLocals (basic OpIncrStack defaultSourcePos))
+      <> body
+      <> mconcat (replicate nLocals (basic OpPop defaultSourcePos))
 
 whenM :: (Monad m) => m Bool -> m () -> m ()
 whenM mb m = mb >>= flip when m
@@ -307,11 +316,11 @@ fromExpr (T.Located l (T.BinOp op e1 e2)) = do
   let
     -- short circuit stuff
     -- 1 extra byte for pop instruction
-    jumpLength = 1 + (fromIntegral . BS.length . code $ c2)
+    jumpLength' = 1 + jumpLength c2
     popChunk = basic OpPop l
   pure $ case op of
-    T.And -> c1 <> jumpChunk l OpJumpIfFalse jumpLength <> popChunk <> c2
-    T.Or -> c1 <> jumpChunk l OpJumpIfTrue jumpLength <> popChunk <> c2
+    T.And -> c1 <> jumpChunk l OpJumpIfFalse jumpLength' <> popChunk <> c2
+    T.Or -> c1 <> jumpChunk l OpJumpIfTrue jumpLength' <> popChunk <> c2
     _ -> c1 <> c2 <> fromOp fromBinOp l op
 fromExpr (T.Located l (T.UnOp op e1)) = do
   c <- fromExpr e1
@@ -342,10 +351,10 @@ fromStmt (T.If cond trueBody falseBody) = do
   let popChunk = basic OpPop (T.location cond)
       -- extra 1 byte at start for pop instruction,
       -- 3 bytes at end for jump past false body
-      trueJumpLength = 1 + (fromIntegral . BS.length . code $ trueChunk) + 3
+      trueJumpLength = 1 + jumpLength trueChunk + 3
       trueJumpChunk = jumpChunk (T.location cond) OpJumpIfFalse trueJumpLength
       -- extra 1 byte at start for pop instruction
-      falseJumpLength = 1 + (fromIntegral . BS.length . code $ falseChunk)
+      falseJumpLength = 1 + jumpLength falseChunk
       falseJumpChunk = jumpChunk (T.location cond) OpJump falseJumpLength
   pure . mconcat $
     [ condChunk
@@ -356,6 +365,22 @@ fromStmt (T.If cond trueBody falseBody) = do
     , popChunk -- ◄──────┘│
     , falseChunk --       │
     ] --  ◄───────────────┘
+fromStmt (T.While cond body) = do
+  condChunk <- fromExpr cond
+  bodyChunk <- fromStmt body
+  let popChunk = basic OpPop (T.location cond)
+      loopJumpLength = jumpLength condChunk + 3 + 1 + jumpLength bodyChunk + 3
+      loopChunk = jumpChunk (T.location cond) OpLoop loopJumpLength
+      falseJumpLength = 1 + jumpLength bodyChunk + 3
+      falseJumpChunk = jumpChunk (T.location cond) OpJumpIfFalse falseJumpLength
+  pure . mconcat $
+    [ condChunk -- ◄──────┐
+    , falseJumpChunk -- ─┐│
+    , popChunk --        ││
+    , bodyChunk --       ││
+    , loopChunk -- ──────┼┘
+    , popChunk -- ◄──────┘
+    ]
 fromStmt (T.Scope program) = inNewScope (fromProgram program)
 
 fromDecl :: T.Decl -> Compiler Chunk
@@ -367,7 +392,7 @@ fromDecl (T.Bind s e) =
       _ -> do
         offset <- declareLocal s
         c <- fromExpr e
-        (c <> chunkWithOperand (T.location e) OpSetLocal (fromIntegral offset))
+        (c <> chunkWithOperand (T.location e) OpSetLocal (fromIntegral offset) <> basic OpPop (T.location e))
           <$ defineLocal
 fromDecl (T.EvalStmt stmt) = fromStmt stmt
 

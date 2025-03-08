@@ -28,6 +28,8 @@ data VMState = VMState
   , stack :: MVec.IOVector Value
   }
 
+data Sign = Positive | Negative
+
 stackSize :: Int
 stackSize = 1024
 
@@ -90,8 +92,8 @@ showIOVector v n = do
 binOp ::
   (MonadReader Chunk m, MonadState VMState m, MonadError LoxError m, MonadIO m) =>
   m a ->
-  (a -> Value) ->
-  (a -> a -> a) ->
+  (b -> Value) ->
+  (a -> a -> b) ->
   m ()
 binOp consume wrap op = do
   b <- consume
@@ -106,9 +108,10 @@ numBinOp = binOp consumeNum TNum
 
 boolBinOp ::
   (MonadReader Chunk m, MonadState VMState m, MonadError LoxError m, MonadIO m) =>
-  (Bool -> Bool -> Bool) ->
+  m a ->
+  (a -> a -> Bool) ->
   m ()
-boolBinOp = binOp consumeBool TBool
+boolBinOp m = binOp m TBool
 
 unOp ::
   (MonadReader Chunk m, MonadState VMState m, MonadError LoxError m, MonadIO m) =>
@@ -139,8 +142,16 @@ writeToStack idx value = do
 readFromStack :: (MonadState VMState m, MonadIO m) => Int -> m Value
 readFromStack idx = gets stack >>= liftIO . flip MVec.read idx
 
-jump :: (MonadReader Chunk m, MonadState VMState m) => m ()
-jump = readWord16 >>= (\jl -> modifyInstruction (+ jl)) . fromIntegral . fromJust
+signMultiplier :: Sign -> Int
+signMultiplier = \case
+  Positive -> 1
+  Negative -> -1
+
+jumpIf :: (MonadReader Chunk m, MonadState VMState m) => Sign -> Bool -> m ()
+jumpIf sign b = do
+  jumpLength <- fromIntegral . fromJust <$> readWord16
+  let jumpDir = signMultiplier sign * jumpLength
+  when b $ modifyInstruction (+ jumpDir)
 
 interpret :: (MonadReader Chunk m, MonadState VMState m, MonadError LoxError m, MonadIO m) => m ()
 interpret = do
@@ -159,42 +170,40 @@ interpret = do
         Chunk.OpMul -> numBinOp (*)
         Chunk.OpDiv -> numBinOp (/)
         Chunk.OpNot -> unOp consumeBool TBool not
-        Chunk.OpLt -> boolBinOp (<)
-        Chunk.OpLeq -> boolBinOp (<=)
-        Chunk.OpGt -> boolBinOp (>)
-        Chunk.OpGeq -> boolBinOp (>=)
+        Chunk.OpLt -> boolBinOp consumeNum (<)
+        Chunk.OpLeq -> boolBinOp consumeNum (<=)
+        Chunk.OpGt -> boolBinOp consumeNum (>)
+        Chunk.OpGeq -> boolBinOp consumeNum (>=)
         -- TODO: short circuit
-        Chunk.OpOr -> boolBinOp (||)
-        Chunk.OpAnd -> boolBinOp (&&)
+        Chunk.OpOr -> boolBinOp consumeBool (||)
+        Chunk.OpAnd -> boolBinOp consumeBool (&&)
         Chunk.OpEq -> eq >>= push . TBool
         Chunk.OpNeq -> eq >>= push . TBool . not
         Chunk.OpPop -> void pop
+        Chunk.OpIncrStack -> modify (\vm -> vm{stackTop = stackTop vm + 1})
         Chunk.OpBindGlobal -> do
           v <- pop
           ident <- getStringConstant
           ref <- liftIO $ newIORef v
           modifyGlobals (Map.insert ident ref)
         Chunk.OpSetGlobal -> do
-          v <- pop
+          v <- peek
           ref <- getGlobalRef =<< getStringConstant
           liftIO $ writeIORef ref v
         Chunk.OpGetGlobal -> do
           ref <- getGlobalRef =<< getStringConstant
           liftIO (readIORef ref) >>= push
         Chunk.OpSetLocal -> do
-          v <- pop
+          v <- peek
           offset <- fromIntegral . fromJust <$> readWord
           writeToStack offset v
         Chunk.OpGetLocal -> do
           offset <- fromIntegral . fromJust <$> readWord
           readFromStack offset >>= push
-        Chunk.OpJumpIfFalse -> do
-          b <- truthyValue <$> peek
-          if b then void readWord16 else jump
-        Chunk.OpJumpIfTrue -> do
-          b <- truthyValue <$> peek
-          if b then jump else void readWord16
-        Chunk.OpJump -> jump
+        Chunk.OpJumpIfFalse -> peek >>= jumpIf Positive . not . truthyValue
+        Chunk.OpJumpIfTrue -> peek >>= jumpIf Positive . truthyValue
+        Chunk.OpJump -> jumpIf Positive True
+        Chunk.OpLoop -> jumpIf Negative True
       interpret
  where
   eq = do

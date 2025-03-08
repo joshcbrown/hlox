@@ -171,7 +171,8 @@ whileStmt =
 
 forStmt :: Parser Stmt
 forStmt = do
-  pre <- keyword "for" *> symbol "(" *> assignDecl
+  void $ keyword "for" *> symbol "("
+  pre <- assignDecl <|> (EvalStmt <$> exprStmt)
   cond <- expr
   post <- EvalExpr <$> (symbol ";" *> expr <* symbol ")")
   prog <- stmt
@@ -179,6 +180,9 @@ forStmt = do
 
 -- returnStmt :: Parser Stmt
 -- returnStmt = Return <$> (keyword "return" *> expr <* symbol ";")
+
+exprStmt :: Parser Stmt
+exprStmt = EvalExpr <$> (expr <* symbol ";")
 
 stmt :: Parser Stmt
 stmt =
@@ -188,7 +192,7 @@ stmt =
     , whileStmt
     , forStmt
     , -- , returnStmt
-      EvalExpr <$> (expr <* symbol ";")
+      exprStmt
     ]
 
 params :: Parser [String]
