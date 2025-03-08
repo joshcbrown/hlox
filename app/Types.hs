@@ -8,6 +8,7 @@ module Types (
   SourcePos (..),
   unPos,
   Located (..),
+  Stmt (..),
   Decl (..),
   Program,
   ExprError_ (..),
@@ -59,14 +60,18 @@ data Located a = Located
   }
   deriving (Functor)
 
+data Stmt
+  = EvalExpr Expr
+  | If Expr Stmt (Maybe Stmt)
+  | While Expr Stmt
+  | Return Expr
+  | Scope Program
+  deriving (Show)
+
 data Decl
   = Bind String Expr
-  | Return Expr
-  | Scope [Decl]
-  | EvalExpr Expr
-  | If Expr [Decl] (Maybe [Decl])
-  | While Expr [Decl]
-  | Fun String [String] [Decl]
+  | Fun String [String] Program
+  | EvalStmt Stmt
   deriving (Show)
 
 type Expr = Located Expr_

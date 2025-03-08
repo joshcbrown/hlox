@@ -9,10 +9,9 @@ import Data.ByteString qualified as BS
 import Data.Text qualified as T
 import Data.Vector qualified as Vec
 import Environment (Env)
-import Eval (evalProgram_, evalRepl_)
 import LoxPrelude (globalEnv)
 import Opts (ExecutionMode (..), executionMode, parseOptions)
-import Parse (decl, parseTest'', runLoxParser)
+import Parse (decl, runLoxParser)
 import System.Console.Haskeline
 import Types (LoxError)
 import VirtualMachine qualified as VM
@@ -36,28 +35,28 @@ repl = do
       case res of
         Left e -> liftIO $ print e
         _ -> pure ()
+      lift VM.resetVM
       repl
 
 executeRepl :: (MonadError LoxError m, MonadIO m, MonadState VM.VMState m) => T.Text -> m ()
 executeRepl input =
-  liftEither (parseTest'' decl input) >>= \d -> do
-    c <- liftEither $ Chunk.fromDecl_ d
+  liftEither (runLoxParser "" input) >>= \d -> do
+    c <- liftEither $ Chunk.fromProgram_ d
     liftIO $ disassembleChunk c
     VM.runProgram c
-    VM.resetVM
-
-executeProgram :: (MonadState Env m, MonadError LoxError m, MonadIO m) => T.Text -> m ()
-executeProgram input = either throwError pure (runLoxParser True "" input) >>= evalProgram_
-
-regular :: FilePath -> IO ()
-regular file = do
-  t <- T.pack <$> readFile file
-  res <- runExceptT (evalStateT (executeProgram t) globalEnv)
-  case res of
-    Left e -> print e
-    Right () -> pure ()
 
 -- old
+-- executeProgram :: (MonadState Env m, MonadError LoxError m, MonadIO m) => T.Text -> m ()
+-- executeProgram input = either throwError pure (runLoxParser True "" input) >>= evalProgram_
+--
+-- regular :: FilePath -> IO ()
+-- regular file = do
+--   t <- T.pack <$> readFile file
+--   res <- runExceptT (evalStateT (executeProgram t) globalEnv)
+--   case res of
+--     Left e -> print e
+--     Right () -> pure ()
+
 -- main :: IO ()
 -- main = do
 --   opts <- parseOptions

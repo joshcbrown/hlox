@@ -51,7 +51,6 @@ executable lox
   other-modules:
     Chunk
     Environment
-    Eval
     LoxPrelude
     Opts
     Parse

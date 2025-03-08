@@ -331,23 +331,13 @@ fromExpr (T.Located l (T.Assgn s e)) =
               Nothing -> constantChunk l (T.TString s) OpSetGlobal
         )
 
-fromDecl :: T.Decl -> Compiler Chunk
-fromDecl (T.Bind s e) =
-  gets scopeDepth
-    >>= \case
-      0 ->
-        liftM2 (<>) (fromExpr e) (constantChunk (T.location e) (T.TString s) OpBindGlobal)
-      _ -> do
-        offset <- declareLocal s
-        c <- fromExpr e
-        (c <> chunkWithOperand (T.location e) OpSetLocal (fromIntegral offset))
-          <$ defineLocal
-fromDecl (T.EvalExpr e) = fmap (<> basic OpPop (T.location e)) (fromExpr e)
-fromDecl (T.If cond trueBody falseBody) = do
+fromStmt :: T.Stmt -> Compiler Chunk
+fromStmt (T.EvalExpr e) = fmap (<> basic OpPop (T.location e)) (fromExpr e)
+fromStmt (T.If cond trueBody falseBody) = do
   condChunk <- fromExpr cond
-  trueChunk <- inNewScope $ fromProgram trueBody
+  trueChunk <- fromStmt trueBody
   falseChunk <- case falseBody of
-    Just body -> inNewScope $ fromProgram body
+    Just body -> fromStmt body
     Nothing -> pure mempty
   let popChunk = basic OpPop (T.location cond)
       -- extra 1 byte at start for pop instruction,
@@ -366,9 +356,23 @@ fromDecl (T.If cond trueBody falseBody) = do
     , popChunk -- ◄──────┘│
     , falseChunk --       │
     ] --  ◄───────────────┘
+fromStmt (T.Scope program) = inNewScope (fromProgram program)
+
+fromDecl :: T.Decl -> Compiler Chunk
+fromDecl (T.Bind s e) =
+  gets scopeDepth
+    >>= \case
+      0 ->
+        liftM2 (<>) (fromExpr e) (constantChunk (T.location e) (T.TString s) OpBindGlobal)
+      _ -> do
+        offset <- declareLocal s
+        c <- fromExpr e
+        (c <> chunkWithOperand (T.location e) OpSetLocal (fromIntegral offset))
+          <$ defineLocal
+fromDecl (T.EvalStmt stmt) = fromStmt stmt
 
 fromProgram :: T.Program -> Compiler Chunk
 fromProgram = fmap mconcat . traverse fromDecl
 
-fromDecl_ :: T.Decl -> Either T.LoxError Chunk
-fromDecl_ d = evalState (runExceptT (fromDecl d)) (CompilerState 0 0 [] [])
+fromProgram_ :: T.Program -> Either T.LoxError Chunk
+fromProgram_ d = evalState (runExceptT (fromProgram d)) (CompilerState 0 0 [] [])
