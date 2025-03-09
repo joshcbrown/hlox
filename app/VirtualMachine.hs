@@ -2,30 +2,29 @@ module VirtualMachine where
 
 import Chunk (Chunk)
 import Chunk qualified
-import Control.Monad (forM, forM_, unless, void, when)
-import Control.Monad.Except (ExceptT, MonadError (..), runExceptT)
+import Control.Monad (void, when)
+import Control.Monad.Except (MonadError (..))
 import Control.Monad.IO.Class (MonadIO (..))
-import Control.Monad.Reader (MonadReader (..), ReaderT, ask, asks, runReaderT)
-import Control.Monad.State (MonadState (..), StateT, evalStateT, gets, modify, put)
+import Control.Monad.Reader (MonadReader (..), ask, asks, runReaderT)
+import Control.Monad.State (MonadState (..), gets, modify, put)
 import Data.ByteString qualified as BS
 import Data.IORef (IORef, newIORef, readIORef, writeIORef)
 import Data.List (intercalate)
 import Data.Map (Map)
 import Data.Map qualified as Map
 import Data.Maybe (fromJust)
-import Data.Vector qualified as Vec
 import Data.Vector.Mutable qualified as MVec
 import Data.Word (Word16, Word8)
-import Types
+import Error
 
-type GlobalScope = Map String (IORef Value)
+type GlobalScope = Map String (IORef Chunk.Value)
 
 data VMState = VMState
   { -- in the book, this is represented as just a ByteString, but i'm not sure that's practical...
     globals :: GlobalScope
   , currentInstruction :: Int
   , stackTop :: Int
-  , stack :: MVec.IOVector Value
+  , stack :: MVec.IOVector Chunk.Value
   }
 
 data Sign = Positive | Negative
@@ -37,20 +36,20 @@ debug :: Bool
 debug = True
 
 initialState :: IO VMState
-initialState = VMState Map.empty 0 0 <$> MVec.replicate 1024 TNil
+initialState = VMState Map.empty 0 0 <$> MVec.replicate 1024 Chunk.Nil
 
-peek :: (MonadState VMState m, MonadIO m) => m Value
+peek :: (MonadState VMState m, MonadIO m) => m Chunk.Value
 peek = do
   s <- get
   liftIO $ MVec.read (stack s) (stackTop s - 1)
 
-push :: (MonadState VMState m, MonadIO m) => Value -> m ()
+push :: (MonadState VMState m, MonadIO m) => Chunk.Value -> m ()
 push value = do
   s <- get
   liftIO $ MVec.write (stack s) (stackTop s) value
   put s{stackTop = stackTop s + 1}
 
-pop :: (MonadState VMState m, MonadIO m) => m Value
+pop :: (MonadState VMState m, MonadIO m) => m Chunk.Value
 pop = do
   s <- get
   put (s{stackTop = stackTop s - 1})
@@ -81,7 +80,7 @@ readWord = safely (asks . Chunk.readWord) <* modifyInstruction (+ 1)
 readWord16 :: (MonadReader Chunk m, MonadState VMState m) => m (Maybe Word16)
 readWord16 = safely (asks . Chunk.readWord16) <* modifyInstruction (+ 2)
 
-readConstant :: (MonadReader Chunk m, MonadState VMState m) => m Value
+readConstant :: (MonadReader Chunk m, MonadState VMState m) => m Chunk.Value
 readConstant = readWord >>= (asks . Chunk.getValue) . fromIntegral . fromJust
 
 showIOVector :: (Show a) => MVec.IOVector a -> Int -> IO String
@@ -92,7 +91,7 @@ showIOVector v n = do
 binOp ::
   (MonadReader Chunk m, MonadState VMState m, MonadError LoxError m, MonadIO m) =>
   m a ->
-  (b -> Value) ->
+  (b -> Chunk.Value) ->
   (a -> a -> b) ->
   m ()
 binOp consume wrap op = do
@@ -104,29 +103,22 @@ numBinOp ::
   (MonadReader Chunk m, MonadState VMState m, MonadError LoxError m, MonadIO m) =>
   (Double -> Double -> Double) ->
   m ()
-numBinOp = binOp consumeNum TNum
+numBinOp = binOp consumeNum Chunk.Num
 
 boolBinOp ::
   (MonadReader Chunk m, MonadState VMState m, MonadError LoxError m, MonadIO m) =>
   m a ->
   (a -> a -> Bool) ->
   m ()
-boolBinOp m = binOp m TBool
+boolBinOp m = binOp m Chunk.Bool
 
 unOp ::
   (MonadReader Chunk m, MonadState VMState m, MonadError LoxError m, MonadIO m) =>
   m a ->
-  (a -> Value) ->
+  (a -> Chunk.Value) ->
   (a -> a) ->
   m ()
 unOp consume wrap op = consume >>= push . wrap . op
-
-valEq :: Value -> Value -> Bool
-valEq (TNum x) (TNum y) = x == y
-valEq (TBool b1) (TBool b2) = b1 == b2
-valEq (TString s1) (TString s2) = s1 == s2
-valEq TNil TNil = True
-valEq _ _ = False
 
 whenJust :: (Monad m) => m (Maybe a) -> (a -> m ()) -> m ()
 whenJust m f =
@@ -134,12 +126,12 @@ whenJust m f =
     Just a -> f a
     Nothing -> pure ()
 
-writeToStack :: (MonadState VMState m, MonadIO m) => Int -> Value -> m ()
+writeToStack :: (MonadState VMState m, MonadIO m) => Int -> Chunk.Value -> m ()
 writeToStack idx value = do
   v <- gets stack
   liftIO $ MVec.write v idx value
 
-readFromStack :: (MonadState VMState m, MonadIO m) => Int -> m Value
+readFromStack :: (MonadState VMState m, MonadIO m) => Int -> m Chunk.Value
 readFromStack idx = gets stack >>= liftIO . flip MVec.read idx
 
 signMultiplier :: Sign -> Int
@@ -153,6 +145,12 @@ jumpIf sign b = do
   let jumpDir = signMultiplier sign * jumpLength
   when b $ modifyInstruction (+ jumpDir)
 
+eq :: (MonadState VMState m, MonadIO m) => m Bool
+eq = do
+  b <- pop
+  a <- pop
+  pure (Chunk.valEq a b)
+
 interpret :: (MonadReader Chunk m, MonadState VMState m, MonadError LoxError m, MonadIO m) => m ()
 interpret = do
   when debug $ do
@@ -164,12 +162,12 @@ interpret = do
       case Chunk.fromWord op of
         Chunk.OpReturn -> pure ()
         Chunk.OpConstant -> readConstant >>= push
-        Chunk.OpNegate -> unOp consumeNum TNum negate
+        Chunk.OpNegate -> unOp consumeNum Chunk.Num negate
         Chunk.OpAdd -> numBinOp (+)
         Chunk.OpSub -> numBinOp (-)
         Chunk.OpMul -> numBinOp (*)
         Chunk.OpDiv -> numBinOp (/)
-        Chunk.OpNot -> unOp consumeBool TBool not
+        Chunk.OpNot -> unOp consumeBool Chunk.Bool not
         Chunk.OpLt -> boolBinOp consumeNum (<)
         Chunk.OpLeq -> boolBinOp consumeNum (<=)
         Chunk.OpGt -> boolBinOp consumeNum (>)
@@ -177,8 +175,8 @@ interpret = do
         -- TODO: short circuit
         Chunk.OpOr -> boolBinOp consumeBool (||)
         Chunk.OpAnd -> boolBinOp consumeBool (&&)
-        Chunk.OpEq -> eq >>= push . TBool
-        Chunk.OpNeq -> eq >>= push . TBool . not
+        Chunk.OpEq -> eq >>= push . Chunk.Bool
+        Chunk.OpNeq -> eq >>= push . Chunk.Bool . not
         Chunk.OpPop -> void pop
         Chunk.OpIncrStack -> modify (\vm -> vm{stackTop = stackTop vm + 1})
         Chunk.OpBindGlobal -> do
@@ -205,11 +203,6 @@ interpret = do
         Chunk.OpJump -> jumpIf Positive True
         Chunk.OpLoop -> jumpIf Negative True
       interpret
- where
-  eq = do
-    b <- pop
-    a <- pop
-    pure (valEq a b)
 
 debugCurrentInstruction :: (MonadReader Chunk m, MonadState VMState m, MonadIO m) => m ()
 debugCurrentInstruction = do
@@ -228,7 +221,7 @@ throwExprError err = do
   let l = Chunk.getSourcePos idx chunk
   throwError (exprError l err)
 
-getGlobalRef :: (MonadState VMState m, MonadError LoxError m, MonadReader Chunk m) => String -> m (IORef Value)
+getGlobalRef :: (MonadState VMState m, MonadError LoxError m, MonadReader Chunk m) => String -> m (IORef Chunk.Value)
 getGlobalRef ident = do
   curGlobals <- gets globals
   case Map.lookup ident curGlobals of
@@ -239,21 +232,21 @@ consumeNum :: (MonadReader Chunk m, MonadState VMState m, MonadError LoxError m,
 consumeNum = do
   v <- pop
   case v of
-    TNum x -> pure x
+    Chunk.Num x -> pure x
     _ -> do
       idx <- gets currentInstruction
       chunk <- ask
       let l = Chunk.getSourcePos idx chunk
-      throwError (exprError l $ TypeError "num" v)
+      throwError (exprError l $ TypeError "num" undefined)
 
-truthyValue :: Value -> Bool
+truthyValue :: Chunk.Value -> Bool
 truthyValue = \case
-  TBool b -> b
-  TNum x -> (x /= 0.0)
-  TNil -> False
-  TString s -> (not $ null s)
-  TNativeFunction _ -> True
-  TFunction{} -> True
+  Chunk.Bool b -> b
+  Chunk.Num x -> (x /= 0.0)
+  Chunk.Nil -> False
+  Chunk.String s -> (not $ null s)
+  Chunk.NativeFunction _ -> True
+  Chunk.Function{} -> True
 
 consumeBool :: (MonadState VMState m, MonadIO m) => m Bool
 consumeBool = fmap truthyValue pop
@@ -261,5 +254,5 @@ consumeBool = fmap truthyValue pop
 getStringConstant :: (MonadState VMState m, MonadReader Chunk m) => m String
 getStringConstant =
   readConstant >>= \case
-    TString ident -> pure ident
+    Chunk.String ident -> pure ident
     _ -> undefined

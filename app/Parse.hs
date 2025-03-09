@@ -5,11 +5,13 @@ module Parse (
 )
 where
 
+import AST
 import Control.Monad (void)
 import Control.Monad.Combinators.Expr
 import Data.Maybe (fromMaybe, isJust)
 import Data.Text qualified as T
 import Data.Void (Void)
+import Error
 import Text.Megaparsec
 import Text.Megaparsec.Char
 import Text.Megaparsec.Char.Lexer qualified as L
@@ -202,13 +204,13 @@ funDecl :: Parser Decl
 funDecl = do
   name <- keyword "fun" *> ident <* symbol "("
   ps <- params <* symbol ")"
-  body <- program
-  pure $ Fun name ps body
+  Fun name ps <$> program
 
 decl :: Parser Decl
 decl =
   choice
     [ assignDecl
+    , funDecl
     , EvalStmt <$> stmt
     ]
 
