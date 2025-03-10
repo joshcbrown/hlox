@@ -1,21 +1,28 @@
+{-# LANGUAGE RecordWildCards #-}
+
 module VirtualMachine where
 
 import Chunk (Chunk)
 import Chunk qualified
-import Control.Monad (void, when)
-import Control.Monad.Except (MonadError (..))
+import Control.Monad (replicateM, void, when)
+import Control.Monad.Except (MonadError (..), liftEither)
 import Control.Monad.IO.Class (MonadIO (..))
 import Control.Monad.Reader (MonadReader (..), ask, asks, runReaderT)
 import Control.Monad.State (MonadState (..), gets, modify, put)
 import Data.ByteString qualified as BS
+import Data.Functor (($>))
 import Data.IORef (IORef, newIORef, readIORef, writeIORef)
 import Data.List (intercalate)
 import Data.Map (Map)
 import Data.Map qualified as Map
 import Data.Maybe (fromJust)
+import Data.Text qualified as Text
+import Data.Text.IO qualified as TIO
+import Data.Time.Clock.POSIX (getPOSIXTime)
 import Data.Vector.Mutable qualified as MVec
 import Data.Word (Word16, Word8)
 import Error
+import Types (SourcePos)
 
 type GlobalScope = Map String (IORef Chunk.Value)
 
@@ -29,14 +36,38 @@ data VMState = VMState
 
 data Sign = Positive | Negative
 
+type Callable m = [Chunk.Value] -> m Chunk.Value
+
 stackSize :: Int
 stackSize = 1024
 
 debug :: Bool
-debug = True
+debug = False
+
+-- globals
+
+clock :: Chunk.NativeFunction
+clock [] _ = do
+  Right . Chunk.Num . (fromIntegral @Int @Double) . round . (* 1000) <$> getPOSIXTime
+clock args l = pure (Left $ exprError l $ Arity "clock" 0 (length args))
+
+printy :: Chunk.NativeFunction
+printy [] _ = putStrLn "" $> Right Chunk.Nil
+printy (x : xs) l = TIO.putStr (Chunk.valuePretty x <> " ") *> printy xs l
+
+insertIORefs :: (Traversable t) => t a -> IO (t (IORef a))
+insertIORefs = traverse newIORef
+
+initialGlobals :: IO GlobalScope
+initialGlobals = insertIORefs $ Map.fromList [("clock", Chunk.NativeFunction clock), ("print", Chunk.NativeFunction printy)]
 
 initialState :: IO VMState
-initialState = VMState Map.empty 0 0 <$> MVec.replicate 1024 Chunk.Nil
+initialState = do
+  globals <- initialGlobals
+  stack <- MVec.replicate 1024 Chunk.Nil
+  let stackTop = 0
+      currentInstruction = 0
+  pure VMState{..}
 
 peek :: (MonadState VMState m, MonadIO m) => m Chunk.Value
 peek = do
@@ -202,6 +233,11 @@ interpret = do
         Chunk.OpJumpIfTrue -> peek >>= jumpIf Positive . truthyValue
         Chunk.OpJump -> jumpIf Positive True
         Chunk.OpLoop -> jumpIf Negative True
+        Chunk.OpCall -> do
+          nArgs <- fromIntegral . fromJust <$> readWord
+          args <- reverse <$> replicateM nArgs pop
+          f <- consumeCallable
+          f args >>= push
       interpret
 
 debugCurrentInstruction :: (MonadReader Chunk m, MonadState VMState m, MonadIO m) => m ()
@@ -228,16 +264,30 @@ getGlobalRef ident = do
     Nothing -> throwExprError $ NotInScope ident
     Just ref -> pure ref
 
+currentLocation :: (MonadReader Chunk m, MonadState VMState m) => m SourcePos
+currentLocation = do
+  idx <- gets currentInstruction
+  asks (Chunk.getSourcePos idx)
+
+reportError :: (MonadReader Chunk m, MonadState VMState m, MonadError LoxError m) => ExprError_ -> m a
+reportError e = do
+  l <- currentLocation
+  throwError . exprError l $ e
+
 consumeNum :: (MonadReader Chunk m, MonadState VMState m, MonadError LoxError m, MonadIO m) => m Double
 consumeNum = do
   v <- pop
   case v of
     Chunk.Num x -> pure x
-    _ -> do
-      idx <- gets currentInstruction
-      chunk <- ask
-      let l = Chunk.getSourcePos idx chunk
-      throwError (exprError l $ TypeError "num" undefined)
+    _ -> reportError $ TypeError "num" (Text.unpack $ Chunk.valuePretty v)
+
+consumeCallable :: (MonadReader Chunk m, MonadState VMState m, MonadError LoxError m, MonadIO m) => m (Callable m)
+consumeCallable =
+  pop >>= \case
+    Chunk.NativeFunction f -> do
+      l <- currentLocation
+      pure (\vs -> liftIO (f vs l) >>= liftEither)
+    v -> reportError $ TypeError "callable" (Text.unpack $ Chunk.valuePretty v)
 
 truthyValue :: Chunk.Value -> Bool
 truthyValue = \case

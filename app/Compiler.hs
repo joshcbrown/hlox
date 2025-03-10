@@ -43,12 +43,12 @@ compileASTValue = \case
   AST.TBool b -> Chunk.Bool b
   AST.TFunction name ps body -> undefined
 
-constantChunk :: SourcePos -> AST.Value -> Chunk.OpCode -> Compiler Chunk
+constantChunk :: SourcePos -> Chunk.Value -> Chunk.OpCode -> Compiler Chunk
 constantChunk l v op = do
   idx <- gets constantCount
   modify (\c -> c{constantCount = idx + 1})
   let code = BS.pack [Chunk.toWord op, idx]
-      constants = Vec.singleton (compileASTValue v)
+      constants = Vec.singleton v
       sourceInfo = Vec.fromList [l, l]
   pure Chunk{..}
 
@@ -120,6 +120,7 @@ defineLocal :: Compiler ()
 defineLocal = do
   ls <- gets locals
   modify (\c -> c{locals = (head ls){depth = Just (scopeDepth c)} : tail ls})
+
 resolveLocal :: String -> Compiler (Maybe Int)
 resolveLocal n = do
   ls <- gets locals
@@ -168,20 +169,25 @@ compileExpr (Located l (AST.BinOp op e1 e2)) = do
 compileExpr (Located l (AST.UnOp op e1)) = do
   c <- compileExpr e1
   pure (c <> compileOp unOp l op)
-compileExpr (Located l (AST.Value v)) = constantChunk l v OpConstant
+compileExpr (Located l (AST.Value v)) = constantChunk l (compileASTValue v) OpConstant
 compileExpr (Located l (AST.Ident s)) =
   resolveLocal s
     >>= \case
       Just offset -> pure $ chunkWithOperand l OpGetLocal (fromIntegral offset)
-      Nothing -> constantChunk l (AST.TString s) OpGetGlobal
+      Nothing -> constantChunk l (Chunk.String s) OpGetGlobal
 compileExpr (Located l (AST.Assgn s e)) =
   (<>)
     <$> compileExpr e
     <*> ( resolveLocal s
             >>= \case
               Just offset -> pure $ chunkWithOperand l OpSetLocal (fromIntegral offset)
-              Nothing -> constantChunk l (AST.TString s) OpSetGlobal
+              Nothing -> constantChunk l (Chunk.String s) OpSetGlobal
         )
+compileExpr (Located l (AST.Call e es)) = do
+  functionChunk <- compileExpr e
+  paramsChunk <- mconcat <$> traverse compileExpr es
+  let callChunk = chunkWithOperand l OpCall (fromIntegral . length $ es)
+  pure $ functionChunk <> paramsChunk <> callChunk
 
 compileStmt :: AST.Stmt -> Compiler Chunk
 compileStmt (AST.EvalExpr e) = fmap (<> basic OpPop (location e)) (compileExpr e)
@@ -231,7 +237,7 @@ compileDecl (AST.Bind s e) =
   gets scopeDepth
     >>= \case
       0 ->
-        liftM2 (<>) (compileExpr e) (constantChunk (location e) (AST.TString s) OpBindGlobal)
+        liftM2 (<>) (compileExpr e) (constantChunk (location e) (Chunk.String s) OpBindGlobal)
       _ -> do
         offset <- declareLocal s
         c <- compileExpr e

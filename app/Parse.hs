@@ -204,7 +204,7 @@ funDecl :: Parser Decl
 funDecl = do
   name <- keyword "fun" *> ident <* symbol "("
   ps <- params <* symbol ")"
-  Fun name ps <$> program
+  Fun name ps <$> stmt
 
 decl :: Parser Decl
 decl =

@@ -75,6 +75,7 @@ data OpCode
   | OpBindGlobal
   | OpSetGlobal
   | OpGetGlobal
+  | OpCall
   | OpReturn
   | OpLoop
   deriving (Enum, Show)
@@ -172,6 +173,7 @@ disassembleInstruction = do
     OpBindGlobal -> constantInstruction'
     OpSetGlobal -> constantInstruction'
     OpGetGlobal -> constantInstruction'
+    OpCall -> localInstruction'
     OpSetLocal -> localInstruction'
     OpGetLocal -> localInstruction'
     OpJumpIfFalse -> jumpInstruction' True
@@ -200,12 +202,3 @@ disassembleLoop = do
     result <- disassembleInstruction
     tell [result]
     disassembleLoop
-
-clock :: NativeFunction
-clock [] _ = do
-  Right . Num . (fromIntegral @Int @Double) . round . (* 1000) <$> getPOSIXTime
-clock args l = pure (Left $ exprError l $ Arity "clock" 0 (length args))
-
-printy :: NativeFunction
-printy [] _ = putStrLn "" $> Right Nil
-printy (x : xs) l = TIO.putStr (valuePretty x <> " ") *> printy xs l

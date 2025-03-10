@@ -14,7 +14,8 @@ import System.Console.Haskeline
 import VirtualMachine qualified as VM
 
 runRepl :: IO ()
-runRepl = VM.initialState >>= evalStateT (runInputT settings repl)
+runRepl = do
+  VM.initialState >>= evalStateT (runInputT settings repl)
  where
   settings =
     defaultSettings

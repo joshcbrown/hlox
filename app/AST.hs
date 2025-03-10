@@ -41,7 +41,7 @@ data Stmt
 
 data Decl
   = Bind String Expr
-  | Fun String [String] Program
+  | Fun String [String] Stmt
   | EvalStmt Stmt
   deriving (Show)
 
