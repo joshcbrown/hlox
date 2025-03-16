@@ -2,7 +2,9 @@ module BluefinHelpers where
 
 import Bluefin.Compound
 import Bluefin.Eff
+import Bluefin.Exception
 import Bluefin.IO
+import Bluefin.State
 import System.Console.Haskeline
 
 data Input e = MkInput
@@ -36,3 +38,9 @@ runInput io k =
     MkInput
       { readInputLineImpl = \s -> effIO io (foo s)
       }
+
+liftEither :: (e1 :> es) => Exception a e1 -> Either a b -> Eff es b
+liftEither exn = either (throw exn) pure
+
+gets :: (e1 :> es) => State a e1 -> (a -> b) -> Eff es b
+gets state f = fmap f (get state)

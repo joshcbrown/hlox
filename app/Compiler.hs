@@ -1,4 +1,5 @@
 {-# LANGUAGE RecordWildCards #-}
+{-# OPTIONS_GHC -Wno-incomplete-patterns #-}
 
 module Compiler where
 
@@ -8,6 +9,7 @@ import Chunk qualified
 import Control.Monad
 import Control.Monad.Except (ExceptT, MonadError (..), runExceptT)
 import Control.Monad.State
+import Control.Monad.Writer (WriterT (runWriterT), runWriter, tell)
 import Data.Bits (shiftR)
 import Data.ByteString qualified as BS
 import Data.Foldable
@@ -23,6 +25,7 @@ data Local = Local
   { name :: String
   , depth :: Maybe Int
   }
+  deriving (Show)
 
 -- TODO: replace with more haskell-y solution. scopeDepth and localCounts are totally unnecessary,
 -- can be replaced with locals :: [Map String Int]
@@ -32,8 +35,9 @@ data CompilerState = CompilerState
   , localCounts :: [Int]
   , locals :: [Local]
   }
+  deriving (Show)
 
-type Compiler = ExceptT LoxError (State CompilerState)
+type Compiler = (ExceptT LoxError (WriterT String (State CompilerState)))
 
 compileASTValue :: AST.Value -> Chunk.Value
 compileASTValue = \case
@@ -86,7 +90,14 @@ inNewScope m = do
   modify (\c -> c{scopeDepth = scopeDepth c + 1, localCounts = 0 : localCounts c})
   body <- m
   nLocals <- gets (head . localCounts)
-  modify (\c -> c{scopeDepth = scopeDepth c - 1, localCounts = tail (localCounts c)})
+  modify
+    ( \c ->
+        c
+          { scopeDepth = scopeDepth c - 1
+          , localCounts = tail (localCounts c)
+          , locals = drop (head (localCounts c)) (locals c)
+          }
+    )
   pure $
     mconcat (replicate nLocals (basic OpIncrStack defaultSourcePos))
       <> body
@@ -248,5 +259,5 @@ compileDecl (AST.EvalStmt stmt) = compileStmt stmt
 compileProgram :: AST.Program -> Compiler Chunk
 compileProgram = fmap mconcat . traverse compileDecl
 
-compileProgram_ :: AST.Program -> Either LoxError Chunk
-compileProgram_ d = evalState (runExceptT (compileProgram d)) (CompilerState 0 0 [] [])
+compileProgram_ :: AST.Program -> (Either LoxError Chunk, String)
+compileProgram_ d = evalState (runWriterT . runExceptT $ compileProgram d) (CompilerState 0 0 [] [])

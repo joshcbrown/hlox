@@ -36,6 +36,7 @@ data VMState = VMState
   , currentInstruction :: Int
   , stackTop :: Int
   , stack :: MVec.IOVector Chunk.Value
+  , debug :: Bool
   }
 
 data Sign = Positive | Negative
@@ -47,9 +48,6 @@ gets state f = fmap f (get state)
 
 stackSize :: Int
 stackSize = 1024
-
-debug :: Bool
-debug = False
 
 -- globals
 
@@ -68,8 +66,8 @@ insertIORefs = traverse newIORef
 initialGlobals :: IO GlobalScope
 initialGlobals = insertIORefs $ Map.fromList [("clock", Chunk.NativeFunction clock), ("print", Chunk.NativeFunction printy)]
 
-initialState :: IO VMState
-initialState = do
+initialState :: Bool -> IO VMState
+initialState debug = do
   globals <- initialGlobals
   stack <- MVec.replicate 1024 Chunk.Nil
   let stackTop = 0
@@ -165,10 +163,11 @@ interpret ::
   IOE e4 ->
   Eff es ()
 interpret reader state exn io = do
-  when debug $ do
-    s <- get state
+  s <- get state
+  when (debug s) $ do
     effIO io (showIOVector (stack s) (stackTop s) >>= putStrLn)
     debugCurrentInstruction reader state io
+
   whenJust (readWord reader state) $
     \op -> do
       case Chunk.fromWord op of

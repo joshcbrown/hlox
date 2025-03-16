@@ -13,8 +13,9 @@ data ExecutionMode
   | File FilePath
   deriving (Show, Eq)
 
-newtype Options = Options
+data Options = Options
   { executionMode :: ExecutionMode
+  , debug :: Bool
   }
   deriving (Show, Eq)
 
@@ -30,7 +31,14 @@ modeParser = fileMode <|> pure Repl
         )
 
 optionsParser :: Parser Options
-optionsParser = Options <$> modeParser
+optionsParser =
+  Options
+    <$> modeParser
+    <*> switch
+      ( long "debug"
+          <> short 'd'
+          <> help "show disassembly of instruction before execution"
+      )
 
 parseOptions :: IO Options
 parseOptions = execParser opts

@@ -1,5 +1,6 @@
 module Main where
 
+import AST qualified
 import Bluefin.Eff
 import Bluefin.Exception
 import Bluefin.IO
@@ -7,15 +8,16 @@ import Bluefin.State
 import BluefinHelpers
 import Chunk
 import Compiler (compileProgram_)
+import Control.Monad (when)
 import Data.Text qualified as T
 import Error
-import Opts (ExecutionMode (..), executionMode, parseOptions)
+import Opts (ExecutionMode (..), Options (..), executionMode, parseOptions)
 import Parse (runLoxParser)
 import VirtualMachine qualified as VM
 
-runRepl :: IO ()
-runRepl = do
-  initialState <- VM.initialState
+runRepl :: Bool -> IO ()
+runRepl debug = do
+  initialState <- VM.initialState debug
   runEff $ \io -> do
     evalState initialState $ \state -> do
       runInput io $ \input -> repl state input io
@@ -27,34 +29,35 @@ repl state input io = do
     Nothing -> return ()
     Just "exit" -> return ()
     Just program -> do
-      res <- try $ \exn -> executeRepl state exn io (T.pack program)
+      res <- try $ \exn -> executeProgram state exn io (T.pack program)
       case res of
         Left e -> effIO io $ print e
         _ -> pure ()
       VM.resetVM state
       repl state input io
 
-executeRepl :: (e1 :> es, e2 :> es, e3 :> es) => State VM.VMState e1 -> Exception LoxError e2 -> IOE e3 -> T.Text -> Eff es ()
-executeRepl state exn io input =
-  liftEither (runLoxParser "" input) >>= \d -> do
-    c <- liftEither $ compileProgram_ d
-    effIO io $ disassembleChunk c
-    VM.runProgram state exn io c
- where
-  liftEither = either (throw exn) pure
+whenDebug :: (e1 :> es) => State VM.VMState e1 -> Eff es () -> Eff es ()
+whenDebug state e = gets state VM.debug >>= flip when e
+
+compileWithDebug :: (e1 :> es, e2 :> es, e3 :> es) => State VM.VMState e1 -> Exception LoxError e2 -> IOE e3 -> AST.Program -> Eff es Chunk
+compileWithDebug state exn io program =
+  let (res, logs) = compileProgram_ program
+   in do
+        chunk <- liftEither exn res
+        whenDebug state $ effIO io (putStrLn logs)
+        whenDebug state $ effIO io (disassembleChunk chunk)
+        pure chunk
 
 executeProgram :: (e1 :> es, e2 :> es, e3 :> es) => State VM.VMState e1 -> Exception LoxError e2 -> IOE e3 -> T.Text -> Eff es ()
 executeProgram state exn io input =
-  liftEither (runLoxParser "" input)
-    >>= liftEither . compileProgram_
+  liftEither exn (runLoxParser "" input)
+    >>= compileWithDebug state exn io
     >>= VM.runProgram state exn io
- where
-  liftEither = either (throw exn) pure
 
-regular :: FilePath -> IO ()
-regular file = do
+regular :: Bool -> FilePath -> IO ()
+regular debug file = do
   t <- T.pack <$> readFile file
-  initialState <- VM.initialState
+  initialState <- VM.initialState debug
   res <- runEff $ \io ->
     evalState initialState $ \state ->
       try $ \exn ->
@@ -67,5 +70,5 @@ main :: IO ()
 main = do
   opts <- parseOptions
   case executionMode opts of
-    Repl -> runRepl
-    File file -> regular file
+    Repl -> runRepl (debug opts)
+    File file -> regular (debug opts) file
