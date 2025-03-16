@@ -2,21 +2,19 @@
 
 module VirtualMachine where
 
-import Bluefin
 import Bluefin.Eff (Eff, (:>))
 import Bluefin.Exception (Exception, throw)
 import Bluefin.IO (IOE, effIO)
-import Bluefin.Reader
-import Bluefin.State (State, evalState, get, modify, put)
+import Bluefin.State (State, get, modify, put)
 import Chunk (Chunk)
 import Chunk qualified
 import Control.Monad (replicateM, void, when)
-import Control.Monad.Except (MonadError (..), liftEither)
-import Control.Monad.IO.Class (MonadIO (..))
 import Data.ByteString qualified as BS
 import Data.Functor (($>))
 import Data.IORef (IORef, newIORef, readIORef, writeIORef)
 import Data.List (intercalate)
+import Data.List.NonEmpty (NonEmpty (..))
+import Data.List.NonEmpty qualified as NonEmpty
 import Data.Map (Map)
 import Data.Map qualified as Map
 import Data.Maybe (fromJust)
@@ -30,10 +28,16 @@ import Types (SourcePos)
 
 type GlobalScope = Map String (IORef Chunk.Value)
 
+data CallFrame = CallFrame
+  { func :: Chunk.Function
+  , ip :: Int
+  , stackOffset :: Int
+  }
+
 data VMState = VMState
   { -- in the book, this is represented as just a ByteString, but i'm not sure that's practical...
     globals :: GlobalScope
-  , currentInstruction :: Int
+  , frames :: NonEmpty CallFrame
   , stackTop :: Int
   , stack :: MVec.IOVector Chunk.Value
   , debug :: Bool
@@ -46,9 +50,6 @@ type Callable es = [Chunk.Value] -> Eff es Chunk.Value
 gets :: (e1 :> es) => State a e1 -> (a -> b) -> Eff es b
 gets state f = fmap f (get state)
 
-stackSize :: Int
-stackSize = 1024
-
 -- globals
 
 clock :: Chunk.NativeFunction
@@ -60,18 +61,16 @@ printy :: Chunk.NativeFunction
 printy [] _ = putStrLn "" $> Right Chunk.Nil
 printy (x : xs) l = TIO.putStr (Chunk.valuePretty x <> " ") *> printy xs l
 
-insertIORefs :: (Traversable t) => t a -> IO (t (IORef a))
-insertIORefs = traverse newIORef
-
 initialGlobals :: IO GlobalScope
-initialGlobals = insertIORefs $ Map.fromList [("clock", Chunk.NativeFunction clock), ("print", Chunk.NativeFunction printy)]
+initialGlobals = traverse newIORef $ Map.fromList [("clock", Chunk.NativeFunction clock), ("print", Chunk.NativeFunction printy)]
 
 initialState :: Bool -> IO VMState
 initialState debug = do
   globals <- initialGlobals
   stack <- MVec.replicate 1024 Chunk.Nil
   let stackTop = 0
-      currentInstruction = 0
+      -- this _should_ be ok because resetVM should be called before execution begins
+      frames = undefined
   pure VMState{..}
 
 peek :: (e1 :> es, e2 :> es) => State VMState e1 -> IOE e2 -> Eff es Chunk.Value
@@ -91,33 +90,56 @@ pop state io = do
   put state (s{stackTop = stackTop s - 1})
   effIO io $ MVec.read (stack s) (stackTop s - 1)
 
+-- effIO io $ MVec.write (stack s) (stackTop s - 1) Chunk.Nil
+-- pure res
+
 modifyInstruction :: (e1 :> es) => State VMState e1 -> (Int -> Int) -> Eff es ()
-modifyInstruction state f = modify state (\vm -> vm{currentInstruction = f (currentInstruction vm)})
+modifyInstruction state f =
+  modify
+    state
+    -- maybe lenses would be good..
+    ( \vm ->
+        let frames' = frames vm
+            fr = NonEmpty.head frames'
+            frs = NonEmpty.tail frames'
+         in vm{frames = fr{ip = f (ip fr)} :| frs}
+    )
 
 modifyGlobals :: (e1 :> es) => State VMState e1 -> (GlobalScope -> GlobalScope) -> Eff es ()
 modifyGlobals state f = modify state (\vm -> vm{globals = f (globals vm)})
 
+topLevelFrame :: Chunk.Function -> CallFrame
+topLevelFrame func = CallFrame func 0 0
+
 -- TODO: add error handling
-resetVM :: (e1 :> es) => State VMState e1 -> Eff es ()
-resetVM state = modify state (\vm -> vm{currentInstruction = 0, stackTop = 0})
+resetVM :: (e1 :> es) => State VMState e1 -> Chunk.Function -> Eff es ()
+resetVM state func = modify state (\vm -> vm{frames = (topLevelFrame func) :| [], stackTop = 0})
 
-safely :: (e1 :> es, e2 :> es) => Reader Chunk e1 -> State VMState e2 -> (Int -> Eff es a) -> Eff es (Maybe a)
-safely reader state f = do
-  idx <- gets state currentInstruction
-  len <- asks reader (BS.length . Chunk.code)
-  if idx < len
-    then
-      Just <$> f idx
-    else pure Nothing
+safely :: (e1 :> es) => State VMState e1 -> (Int -> Chunk -> a) -> Eff es (Maybe a)
+safely state f = do
+  frame <- gets state (NonEmpty.head . frames)
+  let idx = ip frame
+      chunk = (Chunk.chunk . func) frame
+      len = (BS.length . Chunk.code) chunk
+  pure $
+    if idx < len
+      then
+        Just $ f idx chunk
+      else Nothing
 
-readWord :: (e1 :> es, e2 :> es) => Reader Chunk e1 -> State VMState e2 -> Eff es (Maybe Word8)
-readWord reader state = (safely reader state (asks reader . Chunk.readWord)) <* modifyInstruction state (+ 1)
+currentChunk :: (e1 :> es) => State VMState e1 -> Eff es Chunk
+currentChunk state = gets state (Chunk.chunk . func . NonEmpty.head . frames)
 
-readWord16 :: (e1 :> es, e2 :> es) => Reader Chunk e1 -> State VMState e2 -> Eff es (Maybe Word16)
-readWord16 reader state = (safely reader state (asks reader . Chunk.readWord16)) <* modifyInstruction state (+ 2)
+readWord :: (e1 :> es) => State VMState e1 -> Eff es (Maybe Word8)
+readWord state = (safely state Chunk.readWord) <* modifyInstruction state (+ 1)
 
-readConstant :: (e1 :> es, e2 :> es) => Reader Chunk e1 -> State VMState e2 -> Eff es Chunk.Value
-readConstant reader state = readWord reader state >>= (asks reader . Chunk.getValue) . fromIntegral . fromJust
+readWord16 :: (e1 :> es) => State VMState e1 -> Eff es (Maybe Word16)
+readWord16 state = (safely state Chunk.readWord16) <* modifyInstruction state (+ 2)
+
+readConstant :: (e1 :> es) => State VMState e1 -> Eff es Chunk.Value
+readConstant state = do
+  idx <- fromIntegral . fromJust <$> readWord state
+  Chunk.getValue idx <$> currentChunk state
 
 showIOVector :: (Show a) => MVec.IOVector a -> Int -> IO String
 showIOVector v n = do
@@ -143,9 +165,9 @@ signMultiplier = \case
   Positive -> 1
   Negative -> -1
 
-jumpIf :: (e1 :> es, e2 :> es) => Reader Chunk e1 -> State VMState e2 -> Sign -> Bool -> Eff es ()
-jumpIf reader state sign b = do
-  jumpLength <- fromIntegral . fromJust <$> readWord16 reader state
+jumpIf :: (e1 :> es) => State VMState e1 -> Sign -> Bool -> Eff es ()
+jumpIf state sign b = do
+  jumpLength <- fromIntegral . fromJust <$> readWord16 state
   let jumpDir = signMultiplier sign * jumpLength
   when b $ modifyInstruction state (+ jumpDir)
 
@@ -156,19 +178,18 @@ eq state io = do
   pure (Chunk.valEq a b)
 
 interpret ::
-  (e1 :> es, e2 :> es, e3 :> es, e4 :> es) =>
-  Reader Chunk e1 ->
-  State VMState e2 ->
-  Exception LoxError e3 ->
-  IOE e4 ->
+  (e1 :> es, e2 :> es, e3 :> es) =>
+  State VMState e1 ->
+  Exception LoxError e2 ->
+  IOE e3 ->
   Eff es ()
-interpret reader state exn io = do
+interpret state exn io = do
   s <- get state
   when (debug s) $ do
     effIO io (showIOVector (stack s) (stackTop s) >>= putStrLn)
-    debugCurrentInstruction reader state io
+    debugCurrentInstruction state io
 
-  whenJust (readWord reader state) $
+  whenJust (readWord state) $
     \op -> do
       case Chunk.fromWord op of
         Chunk.OpReturn -> pure ()
@@ -218,7 +239,7 @@ interpret reader state exn io = do
           args <- reverse <$> replicateM nArgs pop'
           f <- consumeCallable
           f args >>= push'
-      interpret reader state exn io
+      interpret state exn io
  where
   -- surely a better way?
   binOp consume wrap op = do
@@ -234,72 +255,69 @@ interpret reader state exn io = do
     v <- pop state io
     case v of
       Chunk.Num x -> pure x
-      _ -> throwExprError reader state exn $ TypeError "num" (Text.unpack $ Chunk.valuePretty v)
+      _ -> throwExprError state exn $ TypeError "num" (Text.unpack $ Chunk.valuePretty v)
   consumeCallable =
     pop state io >>= \case
       Chunk.NativeFunction f -> do
-        l <- currentLocation reader state
+        l <- currentLocation state
         pure (\vs -> effIO io (f vs l) >>= either (throw exn) pure)
       v ->
-        throwExprError reader state exn $
+        throwExprError state exn $
           TypeError "callable" (Text.unpack $ Chunk.valuePretty v)
   consumeBool = fmap truthyValue (pop state io)
 
-  readConstant' = readConstant reader state
-  getStringConstant' = getStringConstant reader state
-  getGlobalRef' = getGlobalRef reader state exn
+  readConstant' = readConstant state
+  getStringConstant' = getStringConstant state
+  getGlobalRef' = getGlobalRef state exn
   push' = push state io
   pop' = pop state io
   peek' = peek state io
   eq' = eq state io
-  jumpIf' = jumpIf reader state
-  readWord' = readWord reader state
+  jumpIf' = jumpIf state
+  readWord' = readWord state
 
 debugCurrentInstruction ::
-  (e1 :> es, e2 :> es, e3 :> es) =>
-  Reader Chunk e1 ->
-  State VMState e2 ->
-  IOE e3 ->
+  (e1 :> es, e2 :> es) =>
+  State VMState e1 ->
+  IOE e2 ->
   Eff es ()
-debugCurrentInstruction reader state io = do
-  idx <- gets state currentInstruction
-  chunk <- ask reader
+debugCurrentInstruction state io = do
+  idx <- gets state (ip . NonEmpty.head . frames)
+  chunk <- currentChunk state
   when (idx < BS.length (Chunk.code chunk)) $
     effIO io (Chunk.disassembleInstruction_ idx chunk)
 
-runProgram :: (e1 :> es, e2 :> es, e3 :> es) => State VMState e1 -> Exception LoxError e2 -> IOE e3 -> Chunk -> Eff es ()
-runProgram state exn io chunk = runReader chunk (\reader -> interpret reader state exn io)
+runProgram :: (e1 :> es, e2 :> es, e3 :> es) => State VMState e1 -> Exception LoxError e2 -> IOE e3 -> Chunk.Function -> Eff es ()
+runProgram state exn io func = resetVM state func *> interpret state exn io
 
 throwExprError ::
-  (e1 :> es, e2 :> es, e3 :> es) =>
-  Reader Chunk e1 ->
-  State VMState e2 ->
-  Exception LoxError e3 ->
+  (e1 :> es, e2 :> es) =>
+  State VMState e1 ->
+  Exception LoxError e2 ->
   ExprError_ ->
   Eff es a
-throwExprError reader state exn err = do
-  idx <- gets state currentInstruction
-  chunk <- ask reader
+throwExprError state exn err = do
+  idx <- gets state (ip . NonEmpty.head . frames)
+  chunk <- currentChunk state
   let l = Chunk.getSourcePos idx chunk
   throw exn (exprError l err)
 
 getGlobalRef ::
-  (e1 :> es, e2 :> es, e3 :> es) =>
-  Reader Chunk e1 ->
-  State VMState e2 ->
-  Exception LoxError e3 ->
+  (e1 :> es, e2 :> es) =>
+  State VMState e1 ->
+  Exception LoxError e2 ->
   String ->
   Eff es (IORef Chunk.Value)
-getGlobalRef reader state exn ident = do
+getGlobalRef state exn ident = do
   curGlobals <- gets state globals
   case Map.lookup ident curGlobals of
-    Nothing -> throwExprError reader state exn $ NotInScope ident
+    Nothing -> throwExprError state exn $ NotInScope ident
     Just ref -> pure ref
 
-currentLocation :: (e1 :> es, e2 :> es) => Reader Chunk e1 -> State VMState e2 -> Eff es SourcePos
-currentLocation reader state = do
-  idx <- gets state currentInstruction
-  asks reader (Chunk.getSourcePos idx)
+currentLocation :: (e1 :> es) => State VMState e1 -> Eff es SourcePos
+currentLocation state = do
+  idx <- gets state (ip . NonEmpty.head . frames)
+  (Chunk.getSourcePos idx) <$> currentChunk state
 
 truthyValue :: Chunk.Value -> Bool
 truthyValue = \case
@@ -308,10 +326,10 @@ truthyValue = \case
   Chunk.Nil -> False
   Chunk.String s -> (not $ null s)
   Chunk.NativeFunction _ -> True
-  Chunk.Function{} -> True
+  Chunk.VFunction _ -> True
 
-getStringConstant :: (e1 :> es, e2 :> es) => Reader Chunk e1 -> State VMState e2 -> Eff es String
-getStringConstant reader state =
-  readConstant reader state >>= \case
+getStringConstant :: (e1 :> es) => State VMState e1 -> Eff es String
+getStringConstant state =
+  readConstant state >>= \case
     Chunk.String ident -> pure ident
     _ -> undefined

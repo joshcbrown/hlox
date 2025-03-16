@@ -259,5 +259,20 @@ compileDecl (AST.EvalStmt stmt) = compileStmt stmt
 compileProgram :: AST.Program -> Compiler Chunk
 compileProgram = fmap mconcat . traverse compileDecl
 
+initialCompilerState :: CompilerState
+initialCompilerState =
+  CompilerState
+    { constantCount = 0
+    , scopeDepth = 0
+    , localCounts = [1]
+    , locals = [Local{name = "", depth = Just 0}]
+    }
+
 compileProgram_ :: AST.Program -> (Either LoxError Chunk, String)
-compileProgram_ d = evalState (runWriterT . runExceptT $ compileProgram d) (CompilerState 0 0 [] [])
+compileProgram_ d = evalState (runWriterT . runExceptT $ compileProgram d) initialCompilerState
+
+compileTopLevel :: AST.Program -> (Either LoxError Chunk.Function, String)
+compileTopLevel program =
+  let (chunk, logs) = compileProgram_ program
+      res = (Chunk.Function "<script>" 0) <$> chunk
+   in (res, logs)

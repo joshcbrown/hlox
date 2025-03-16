@@ -5,33 +5,33 @@
 
 module Chunk where
 
-import AST qualified
 import Control.Monad
-import Control.Monad.Except (ExceptT, MonadError (..), runExceptT)
 import Control.Monad.State
 import Control.Monad.Writer
-import Data.Bits (shiftL, shiftR)
+import Data.Bits (shiftL)
 import Data.Bool (bool)
 import Data.ByteString qualified as BS
 import Data.Foldable
-import Data.Functor (($>))
-import Data.List (findIndex)
-import Data.Maybe (isNothing)
 import Data.Text (Text, pack)
 import Data.Text.IO qualified as TIO
-import Data.Time.Clock.POSIX
 import Data.Vector ((!))
 import Data.Vector qualified as Vec
 import Data.Word (Word16, Word8)
 import Error
 import Formatting
 import Text.Megaparsec.Pos
-import Types (Located (..))
 
 type NativeFunction = [Value] -> SourcePos -> IO (Either LoxError Value)
 
 instance Show NativeFunction where
   show _ = "<native function>"
+
+data Function = Function
+  { name :: String
+  , arity :: Int
+  , chunk :: Chunk
+  }
+  deriving (Show)
 
 data Value
   = Num Double
@@ -39,7 +39,7 @@ data Value
   | Bool Bool
   | Nil
   | NativeFunction NativeFunction
-  | Function String Int Chunk
+  | VFunction Function
   deriving (Show)
 
 valEq :: Value -> Value -> Bool
@@ -97,8 +97,8 @@ valuePretty :: Value -> Text
 valuePretty (Num x) = sformat (fixed 2) x
 valuePretty (Bool b) = pack (show b)
 valuePretty (String s) = pack s
-valuePretty (NativeFunction _) = "native fun"
-valuePretty (Function name _ _) = sformat ("function " % stext) (pack name)
+valuePretty (NativeFunction _) = "<native fun>"
+valuePretty (VFunction (Function name _ _)) = sformat ("<function " % stext % ">") (pack name)
 valuePretty Nil = "nil"
 
 toWord :: OpCode -> Word8

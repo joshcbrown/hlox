@@ -7,7 +7,7 @@ import Bluefin.IO
 import Bluefin.State
 import BluefinHelpers
 import Chunk
-import Compiler (compileProgram_)
+import Compiler (compileProgram_, compileTopLevel)
 import Control.Monad (when)
 import Data.Text qualified as T
 import Error
@@ -33,20 +33,19 @@ repl state input io = do
       case res of
         Left e -> effIO io $ print e
         _ -> pure ()
-      VM.resetVM state
       repl state input io
 
 whenDebug :: (e1 :> es) => State VM.VMState e1 -> Eff es () -> Eff es ()
 whenDebug state e = gets state VM.debug >>= flip when e
 
-compileWithDebug :: (e1 :> es, e2 :> es, e3 :> es) => State VM.VMState e1 -> Exception LoxError e2 -> IOE e3 -> AST.Program -> Eff es Chunk
+compileWithDebug :: (e1 :> es, e2 :> es, e3 :> es) => State VM.VMState e1 -> Exception LoxError e2 -> IOE e3 -> AST.Program -> Eff es (Chunk.Function)
 compileWithDebug state exn io program =
-  let (res, logs) = compileProgram_ program
+  let (res, logs) = compileTopLevel program
    in do
-        chunk <- liftEither exn res
+        func <- liftEither exn res
         whenDebug state $ effIO io (putStrLn logs)
-        whenDebug state $ effIO io (disassembleChunk chunk)
-        pure chunk
+        whenDebug state $ effIO io (disassembleChunk (Chunk.chunk func))
+        pure func
 
 executeProgram :: (e1 :> es, e2 :> es, e3 :> es) => State VM.VMState e1 -> Exception LoxError e2 -> IOE e3 -> T.Text -> Eff es ()
 executeProgram state exn io input =
