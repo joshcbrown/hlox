@@ -1,59 +1,64 @@
 module Main where
 
+import Bluefin.Eff
+import Bluefin.Exception
+import Bluefin.IO
+import Bluefin.State
+import BluefinHelpers
 import Chunk
 import Compiler (compileProgram_)
-import Control.Monad.Catch (MonadMask)
-import Control.Monad.Except (MonadError (..), liftEither, runExceptT)
-import Control.Monad.IO.Class (MonadIO, liftIO)
-import Control.Monad.State (MonadState, MonadTrans (lift), evalStateT)
 import Data.Text qualified as T
 import Error
 import Opts (ExecutionMode (..), executionMode, parseOptions)
 import Parse (runLoxParser)
-import System.Console.Haskeline
 import VirtualMachine qualified as VM
 
 runRepl :: IO ()
 runRepl = do
-  VM.initialState >>= evalStateT (runInputT settings repl)
- where
-  settings =
-    defaultSettings
-      { historyFile = Just ".lox_history"
-      }
+  initialState <- VM.initialState
+  runEff $ \io -> do
+    evalState initialState $ \state -> do
+      runInput io $ \input -> repl state input io
 
-repl :: (MonadIO m, MonadMask m, MonadState VM.VMState m) => InputT m ()
-repl = do
-  minput <- getInputLine "lox> "
+repl :: (e1 :> es, e2 :> es, e3 :> es) => State VM.VMState e1 -> Input e2 -> IOE e3 -> Eff es ()
+repl state input io = do
+  minput <- readInputLine input "lox> "
   case minput of
     Nothing -> return ()
     Just "exit" -> return ()
-    Just input -> do
-      res <- lift $ runExceptT (executeRepl (T.pack input))
+    Just program -> do
+      res <- try $ \exn -> executeRepl state exn io (T.pack program)
       case res of
-        Left e -> liftIO $ print e
+        Left e -> effIO io $ print e
         _ -> pure ()
-      lift VM.resetVM
-      repl
+      VM.resetVM state
+      repl state input io
 
-executeRepl :: (MonadError LoxError m, MonadIO m, MonadState VM.VMState m) => T.Text -> m ()
-executeRepl input =
+executeRepl :: (e1 :> es, e2 :> es, e3 :> es) => State VM.VMState e1 -> Exception LoxError e2 -> IOE e3 -> T.Text -> Eff es ()
+executeRepl state exn io input =
   liftEither (runLoxParser "" input) >>= \d -> do
     c <- liftEither $ compileProgram_ d
-    liftIO $ disassembleChunk c
-    VM.runProgram c
+    effIO io $ disassembleChunk c
+    VM.runProgram state exn io c
+ where
+  liftEither = either (throw exn) pure
 
-executeProgram :: (MonadState VM.VMState m, MonadError LoxError m, MonadIO m) => T.Text -> m ()
-executeProgram input =
+executeProgram :: (e1 :> es, e2 :> es, e3 :> es) => State VM.VMState e1 -> Exception LoxError e2 -> IOE e3 -> T.Text -> Eff es ()
+executeProgram state exn io input =
   liftEither (runLoxParser "" input)
     >>= liftEither . compileProgram_
-    >>= VM.runProgram
+    >>= VM.runProgram state exn io
+ where
+  liftEither = either (throw exn) pure
 
 regular :: FilePath -> IO ()
 regular file = do
   t <- T.pack <$> readFile file
   initialState <- VM.initialState
-  res <- runExceptT (evalStateT (executeProgram t) initialState)
+  res <- runEff $ \io ->
+    evalState initialState $ \state ->
+      try $ \exn ->
+        executeProgram state exn io t
   case res of
     Left e -> print e
     Right () -> pure ()

@@ -57,6 +57,7 @@ executable lox
     Parse
     Types
     VirtualMachine
+    BluefinHelpers
 
   -- LANGUAGE extensions used by modules in this package.
   default-extensions:
@@ -73,6 +74,7 @@ executable lox
     formatting ^>=7.2.0,
     haskeline ^>=0.8.2.1,
     megaparsec ^>=9.6.1,
+    bluefin ^>=0.0.14.1,
     mtl,
     optparse-applicative ^>=0.18.1.0,
     parser-combinators,

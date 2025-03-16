@@ -2,13 +2,17 @@
 
 module VirtualMachine where
 
+import Bluefin
+import Bluefin.Eff (Eff, (:>))
+import Bluefin.Exception (Exception, throw)
+import Bluefin.IO (IOE, effIO)
+import Bluefin.Reader
+import Bluefin.State (State, evalState, get, modify, put)
 import Chunk (Chunk)
 import Chunk qualified
 import Control.Monad (replicateM, void, when)
 import Control.Monad.Except (MonadError (..), liftEither)
 import Control.Monad.IO.Class (MonadIO (..))
-import Control.Monad.Reader (MonadReader (..), ask, asks, runReaderT)
-import Control.Monad.State (MonadState (..), gets, modify, put)
 import Data.ByteString qualified as BS
 import Data.Functor (($>))
 import Data.IORef (IORef, newIORef, readIORef, writeIORef)
@@ -36,7 +40,10 @@ data VMState = VMState
 
 data Sign = Positive | Negative
 
-type Callable m = [Chunk.Value] -> m Chunk.Value
+type Callable es = [Chunk.Value] -> Eff es Chunk.Value
+
+gets :: (e1 :> es) => State a e1 -> (a -> b) -> Eff es b
+gets state f = fmap f (get state)
 
 stackSize :: Int
 stackSize = 1024
@@ -69,87 +76,55 @@ initialState = do
       currentInstruction = 0
   pure VMState{..}
 
-peek :: (MonadState VMState m, MonadIO m) => m Chunk.Value
-peek = do
-  s <- get
-  liftIO $ MVec.read (stack s) (stackTop s - 1)
+peek :: (e1 :> es, e2 :> es) => State VMState e1 -> IOE e2 -> Eff es Chunk.Value
+peek state io = do
+  s <- get state
+  effIO io $ MVec.read (stack s) (stackTop s - 1)
 
-push :: (MonadState VMState m, MonadIO m) => Chunk.Value -> m ()
-push value = do
-  s <- get
-  liftIO $ MVec.write (stack s) (stackTop s) value
-  put s{stackTop = stackTop s + 1}
+push :: (e1 :> es, e2 :> es) => State VMState e1 -> IOE e2 -> Chunk.Value -> Eff es ()
+push state io value = do
+  s <- get state
+  effIO io $ MVec.write (stack s) (stackTop s) value
+  put state s{stackTop = stackTop s + 1}
 
-pop :: (MonadState VMState m, MonadIO m) => m Chunk.Value
-pop = do
-  s <- get
-  put (s{stackTop = stackTop s - 1})
-  liftIO $ MVec.read (stack s) (stackTop s - 1)
+pop :: (e1 :> es, e2 :> es) => State VMState e1 -> IOE e2 -> Eff es Chunk.Value
+pop state io = do
+  s <- get state
+  put state (s{stackTop = stackTop s - 1})
+  effIO io $ MVec.read (stack s) (stackTop s - 1)
 
-modifyInstruction :: (MonadState VMState m) => (Int -> Int) -> m ()
-modifyInstruction f = modify (\vm -> vm{currentInstruction = f (currentInstruction vm)})
+modifyInstruction :: (e1 :> es) => State VMState e1 -> (Int -> Int) -> Eff es ()
+modifyInstruction state f = modify state (\vm -> vm{currentInstruction = f (currentInstruction vm)})
 
-modifyGlobals :: (MonadState VMState m) => (GlobalScope -> GlobalScope) -> m ()
-modifyGlobals f = modify (\vm -> vm{globals = f (globals vm)})
+modifyGlobals :: (e1 :> es) => State VMState e1 -> (GlobalScope -> GlobalScope) -> Eff es ()
+modifyGlobals state f = modify state (\vm -> vm{globals = f (globals vm)})
 
 -- TODO: add error handling
-resetVM :: (MonadState VMState m) => m ()
-resetVM = modify (\vm -> vm{currentInstruction = 0, stackTop = 0})
+resetVM :: (e1 :> es) => State VMState e1 -> Eff es ()
+resetVM state = modify state (\vm -> vm{currentInstruction = 0, stackTop = 0})
 
-safely :: (MonadReader Chunk m, MonadState VMState m) => (Int -> m a) -> m (Maybe a)
-safely f = do
-  idx <- gets currentInstruction
-  len <- asks (BS.length . Chunk.code)
+safely :: (e1 :> es, e2 :> es) => Reader Chunk e1 -> State VMState e2 -> (Int -> Eff es a) -> Eff es (Maybe a)
+safely reader state f = do
+  idx <- gets state currentInstruction
+  len <- asks reader (BS.length . Chunk.code)
   if idx < len
     then
       Just <$> f idx
     else pure Nothing
 
-readWord :: (MonadReader Chunk m, MonadState VMState m) => m (Maybe Word8)
-readWord = safely (asks . Chunk.readWord) <* modifyInstruction (+ 1)
+readWord :: (e1 :> es, e2 :> es) => Reader Chunk e1 -> State VMState e2 -> Eff es (Maybe Word8)
+readWord reader state = (safely reader state (asks reader . Chunk.readWord)) <* modifyInstruction state (+ 1)
 
-readWord16 :: (MonadReader Chunk m, MonadState VMState m) => m (Maybe Word16)
-readWord16 = safely (asks . Chunk.readWord16) <* modifyInstruction (+ 2)
+readWord16 :: (e1 :> es, e2 :> es) => Reader Chunk e1 -> State VMState e2 -> Eff es (Maybe Word16)
+readWord16 reader state = (safely reader state (asks reader . Chunk.readWord16)) <* modifyInstruction state (+ 2)
 
-readConstant :: (MonadReader Chunk m, MonadState VMState m) => m Chunk.Value
-readConstant = readWord >>= (asks . Chunk.getValue) . fromIntegral . fromJust
+readConstant :: (e1 :> es, e2 :> es) => Reader Chunk e1 -> State VMState e2 -> Eff es Chunk.Value
+readConstant reader state = readWord reader state >>= (asks reader . Chunk.getValue) . fromIntegral . fromJust
 
 showIOVector :: (Show a) => MVec.IOVector a -> Int -> IO String
 showIOVector v n = do
   elements <- traverse (fmap show . MVec.read v) [0 .. n - 1]
   pure $ "[" ++ intercalate ", " elements ++ "]"
-
-binOp ::
-  (MonadReader Chunk m, MonadState VMState m, MonadError LoxError m, MonadIO m) =>
-  m a ->
-  (b -> Chunk.Value) ->
-  (a -> a -> b) ->
-  m ()
-binOp consume wrap op = do
-  b <- consume
-  a <- consume
-  push . wrap $ op a b
-
-numBinOp ::
-  (MonadReader Chunk m, MonadState VMState m, MonadError LoxError m, MonadIO m) =>
-  (Double -> Double -> Double) ->
-  m ()
-numBinOp = binOp consumeNum Chunk.Num
-
-boolBinOp ::
-  (MonadReader Chunk m, MonadState VMState m, MonadError LoxError m, MonadIO m) =>
-  m a ->
-  (a -> a -> Bool) ->
-  m ()
-boolBinOp m = binOp m Chunk.Bool
-
-unOp ::
-  (MonadReader Chunk m, MonadState VMState m, MonadError LoxError m, MonadIO m) =>
-  m a ->
-  (a -> Chunk.Value) ->
-  (a -> a) ->
-  m ()
-unOp consume wrap op = consume >>= push . wrap . op
 
 whenJust :: (Monad m) => m (Maybe a) -> (a -> m ()) -> m ()
 whenJust m f =
@@ -157,42 +132,48 @@ whenJust m f =
     Just a -> f a
     Nothing -> pure ()
 
-writeToStack :: (MonadState VMState m, MonadIO m) => Int -> Chunk.Value -> m ()
-writeToStack idx value = do
-  v <- gets stack
-  liftIO $ MVec.write v idx value
+writeToStack :: (e1 :> es, e2 :> es) => State VMState e1 -> IOE e2 -> Int -> Chunk.Value -> Eff es ()
+writeToStack state io idx value = do
+  v <- gets state stack
+  effIO io $ MVec.write v idx value
 
-readFromStack :: (MonadState VMState m, MonadIO m) => Int -> m Chunk.Value
-readFromStack idx = gets stack >>= liftIO . flip MVec.read idx
+readFromStack :: (e1 :> es, e2 :> es) => State VMState e1 -> IOE e2 -> Int -> Eff es Chunk.Value
+readFromStack state io idx = gets state stack >>= effIO io . flip MVec.read idx
 
 signMultiplier :: Sign -> Int
 signMultiplier = \case
   Positive -> 1
   Negative -> -1
 
-jumpIf :: (MonadReader Chunk m, MonadState VMState m) => Sign -> Bool -> m ()
-jumpIf sign b = do
-  jumpLength <- fromIntegral . fromJust <$> readWord16
+jumpIf :: (e1 :> es, e2 :> es) => Reader Chunk e1 -> State VMState e2 -> Sign -> Bool -> Eff es ()
+jumpIf reader state sign b = do
+  jumpLength <- fromIntegral . fromJust <$> readWord16 reader state
   let jumpDir = signMultiplier sign * jumpLength
-  when b $ modifyInstruction (+ jumpDir)
+  when b $ modifyInstruction state (+ jumpDir)
 
-eq :: (MonadState VMState m, MonadIO m) => m Bool
-eq = do
-  b <- pop
-  a <- pop
+eq :: (e1 :> es, e2 :> es) => State VMState e1 -> IOE e2 -> Eff es Bool
+eq state io = do
+  b <- pop state io
+  a <- pop state io
   pure (Chunk.valEq a b)
 
-interpret :: (MonadReader Chunk m, MonadState VMState m, MonadError LoxError m, MonadIO m) => m ()
-interpret = do
+interpret ::
+  (e1 :> es, e2 :> es, e3 :> es, e4 :> es) =>
+  Reader Chunk e1 ->
+  State VMState e2 ->
+  Exception LoxError e3 ->
+  IOE e4 ->
+  Eff es ()
+interpret reader state exn io = do
   when debug $ do
-    s <- get
-    liftIO (showIOVector (stack s) (stackTop s) >>= putStrLn)
-    debugCurrentInstruction
-  whenJust readWord $
+    s <- get state
+    effIO io (showIOVector (stack s) (stackTop s) >>= putStrLn)
+    debugCurrentInstruction reader state io
+  whenJust (readWord reader state) $
     \op -> do
       case Chunk.fromWord op of
         Chunk.OpReturn -> pure ()
-        Chunk.OpConstant -> readConstant >>= push
+        Chunk.OpConstant -> readConstant' >>= push'
         Chunk.OpNegate -> unOp consumeNum Chunk.Num negate
         Chunk.OpAdd -> numBinOp (+)
         Chunk.OpSub -> numBinOp (-)
@@ -206,88 +187,120 @@ interpret = do
         -- TODO: short circuit
         Chunk.OpOr -> boolBinOp consumeBool (||)
         Chunk.OpAnd -> boolBinOp consumeBool (&&)
-        Chunk.OpEq -> eq >>= push . Chunk.Bool
-        Chunk.OpNeq -> eq >>= push . Chunk.Bool . not
-        Chunk.OpPop -> void pop
-        Chunk.OpIncrStack -> modify (\vm -> vm{stackTop = stackTop vm + 1})
+        Chunk.OpEq -> eq' >>= push' . Chunk.Bool
+        Chunk.OpNeq -> eq' >>= push' . Chunk.Bool . not
+        Chunk.OpPop -> void pop'
+        Chunk.OpIncrStack -> modify state (\vm -> vm{stackTop = stackTop vm + 1})
         Chunk.OpBindGlobal -> do
-          v <- pop
-          ident <- getStringConstant
-          ref <- liftIO $ newIORef v
-          modifyGlobals (Map.insert ident ref)
+          v <- pop'
+          ident <- getStringConstant'
+          ref <- effIO io $ newIORef v
+          modifyGlobals state (Map.insert ident ref)
         Chunk.OpSetGlobal -> do
-          v <- peek
-          ref <- getGlobalRef =<< getStringConstant
-          liftIO $ writeIORef ref v
+          v <- peek'
+          ref <- getGlobalRef' =<< getStringConstant'
+          effIO io $ writeIORef ref v
         Chunk.OpGetGlobal -> do
-          ref <- getGlobalRef =<< getStringConstant
-          liftIO (readIORef ref) >>= push
+          ref <- getGlobalRef' =<< getStringConstant'
+          effIO io (readIORef ref) >>= push'
         Chunk.OpSetLocal -> do
-          v <- peek
-          offset <- fromIntegral . fromJust <$> readWord
-          writeToStack offset v
+          v <- peek'
+          offset <- fromIntegral . fromJust <$> readWord'
+          writeToStack state io offset v
         Chunk.OpGetLocal -> do
-          offset <- fromIntegral . fromJust <$> readWord
-          readFromStack offset >>= push
-        Chunk.OpJumpIfFalse -> peek >>= jumpIf Positive . not . truthyValue
-        Chunk.OpJumpIfTrue -> peek >>= jumpIf Positive . truthyValue
-        Chunk.OpJump -> jumpIf Positive True
-        Chunk.OpLoop -> jumpIf Negative True
+          offset <- fromIntegral . fromJust <$> readWord'
+          readFromStack state io offset >>= push'
+        Chunk.OpJumpIfFalse -> peek' >>= jumpIf' Positive . not . truthyValue
+        Chunk.OpJumpIfTrue -> peek' >>= jumpIf' Positive . truthyValue
+        Chunk.OpJump -> jumpIf' Positive True
+        Chunk.OpLoop -> jumpIf' Negative True
         Chunk.OpCall -> do
-          nArgs <- fromIntegral . fromJust <$> readWord
-          args <- reverse <$> replicateM nArgs pop
+          nArgs <- fromIntegral . fromJust <$> readWord'
+          args <- reverse <$> replicateM nArgs pop'
           f <- consumeCallable
-          f args >>= push
-      interpret
+          f args >>= push'
+      interpret reader state exn io
+ where
+  -- surely a better way?
+  binOp consume wrap op = do
+    b <- consume
+    a <- consume
+    push state io . wrap $ op a b
 
-debugCurrentInstruction :: (MonadReader Chunk m, MonadState VMState m, MonadIO m) => m ()
-debugCurrentInstruction = do
-  idx <- gets currentInstruction
-  chunk <- ask
+  numBinOp = binOp consumeNum Chunk.Num
+  boolBinOp e = binOp e Chunk.Bool
+  unOp consume wrap op = consume >>= push state io . wrap . op
+
+  consumeNum = do
+    v <- pop state io
+    case v of
+      Chunk.Num x -> pure x
+      _ -> throwExprError reader state exn $ TypeError "num" (Text.unpack $ Chunk.valuePretty v)
+  consumeCallable =
+    pop state io >>= \case
+      Chunk.NativeFunction f -> do
+        l <- currentLocation reader state
+        pure (\vs -> effIO io (f vs l) >>= either (throw exn) pure)
+      v ->
+        throwExprError reader state exn $
+          TypeError "callable" (Text.unpack $ Chunk.valuePretty v)
+  consumeBool = fmap truthyValue (pop state io)
+
+  readConstant' = readConstant reader state
+  getStringConstant' = getStringConstant reader state
+  getGlobalRef' = getGlobalRef reader state exn
+  push' = push state io
+  pop' = pop state io
+  peek' = peek state io
+  eq' = eq state io
+  jumpIf' = jumpIf reader state
+  readWord' = readWord reader state
+
+debugCurrentInstruction ::
+  (e1 :> es, e2 :> es, e3 :> es) =>
+  Reader Chunk e1 ->
+  State VMState e2 ->
+  IOE e3 ->
+  Eff es ()
+debugCurrentInstruction reader state io = do
+  idx <- gets state currentInstruction
+  chunk <- ask reader
   when (idx < BS.length (Chunk.code chunk)) $
-    liftIO (Chunk.disassembleInstruction_ idx chunk)
+    effIO io (Chunk.disassembleInstruction_ idx chunk)
 
-runProgram :: (MonadError LoxError m, MonadIO m, MonadState VMState m) => Chunk -> m ()
-runProgram = runReaderT interpret
+runProgram :: (e1 :> es, e2 :> es, e3 :> es) => State VMState e1 -> Exception LoxError e2 -> IOE e3 -> Chunk -> Eff es ()
+runProgram state exn io chunk = runReader chunk (\reader -> interpret reader state exn io)
 
-throwExprError :: (MonadError LoxError m, MonadState VMState m, MonadReader Chunk m) => ExprError_ -> m a
-throwExprError err = do
-  idx <- gets currentInstruction
-  chunk <- ask
+throwExprError ::
+  (e1 :> es, e2 :> es, e3 :> es) =>
+  Reader Chunk e1 ->
+  State VMState e2 ->
+  Exception LoxError e3 ->
+  ExprError_ ->
+  Eff es a
+throwExprError reader state exn err = do
+  idx <- gets state currentInstruction
+  chunk <- ask reader
   let l = Chunk.getSourcePos idx chunk
-  throwError (exprError l err)
+  throw exn (exprError l err)
 
-getGlobalRef :: (MonadState VMState m, MonadError LoxError m, MonadReader Chunk m) => String -> m (IORef Chunk.Value)
-getGlobalRef ident = do
-  curGlobals <- gets globals
+getGlobalRef ::
+  (e1 :> es, e2 :> es, e3 :> es) =>
+  Reader Chunk e1 ->
+  State VMState e2 ->
+  Exception LoxError e3 ->
+  String ->
+  Eff es (IORef Chunk.Value)
+getGlobalRef reader state exn ident = do
+  curGlobals <- gets state globals
   case Map.lookup ident curGlobals of
-    Nothing -> throwExprError $ NotInScope ident
+    Nothing -> throwExprError reader state exn $ NotInScope ident
     Just ref -> pure ref
 
-currentLocation :: (MonadReader Chunk m, MonadState VMState m) => m SourcePos
-currentLocation = do
-  idx <- gets currentInstruction
-  asks (Chunk.getSourcePos idx)
-
-reportError :: (MonadReader Chunk m, MonadState VMState m, MonadError LoxError m) => ExprError_ -> m a
-reportError e = do
-  l <- currentLocation
-  throwError . exprError l $ e
-
-consumeNum :: (MonadReader Chunk m, MonadState VMState m, MonadError LoxError m, MonadIO m) => m Double
-consumeNum = do
-  v <- pop
-  case v of
-    Chunk.Num x -> pure x
-    _ -> reportError $ TypeError "num" (Text.unpack $ Chunk.valuePretty v)
-
-consumeCallable :: (MonadReader Chunk m, MonadState VMState m, MonadError LoxError m, MonadIO m) => m (Callable m)
-consumeCallable =
-  pop >>= \case
-    Chunk.NativeFunction f -> do
-      l <- currentLocation
-      pure (\vs -> liftIO (f vs l) >>= liftEither)
-    v -> reportError $ TypeError "callable" (Text.unpack $ Chunk.valuePretty v)
+currentLocation :: (e1 :> es, e2 :> es) => Reader Chunk e1 -> State VMState e2 -> Eff es SourcePos
+currentLocation reader state = do
+  idx <- gets state currentInstruction
+  asks reader (Chunk.getSourcePos idx)
 
 truthyValue :: Chunk.Value -> Bool
 truthyValue = \case
@@ -298,11 +311,8 @@ truthyValue = \case
   Chunk.NativeFunction _ -> True
   Chunk.Function{} -> True
 
-consumeBool :: (MonadState VMState m, MonadIO m) => m Bool
-consumeBool = fmap truthyValue pop
-
-getStringConstant :: (MonadState VMState m, MonadReader Chunk m) => m String
-getStringConstant =
-  readConstant >>= \case
+getStringConstant :: (e1 :> es, e2 :> es) => Reader Chunk e1 -> State VMState e2 -> Eff es String
+getStringConstant reader state =
+  readConstant reader state >>= \case
     Chunk.String ident -> pure ident
     _ -> undefined
