@@ -103,7 +103,6 @@ evalExpr (Located l e) =
     And -> bopB (&&) TBool
     Eq -> eq'
     Neq -> neq'
-    Dot -> \_ _ -> throwError . exprError l $ NotSupportedError ". operator"
 
 nothing :: (MonadState Env m, MonadError LoxError m, MonadIO m) => m b -> m (Maybe a)
 nothing m = m $> Nothing

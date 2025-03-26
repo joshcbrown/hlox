@@ -1,49 +1,66 @@
 module Main where
 
-import Control.Monad.Catch (MonadMask)
-import Control.Monad.Except (MonadError (..), runExceptT)
-import Control.Monad.IO.Class (MonadIO, liftIO)
-import Control.Monad.State (MonadState, MonadTrans (lift), evalStateT)
+import AST qualified
+import Bluefin.Eff
+import Bluefin.Exception
+import Bluefin.IO
+import Bluefin.State
+import BluefinHelpers
+import Chunk
+import Compiler (compileProgram_, compileTopLevel)
+import Control.Monad (when)
 import Data.Text qualified as T
-import Eval (evalProgram_, evalRepl_)
-import LoxPrelude (globalEnv)
-import Opts (ExecutionMode (..), executionMode, parseOptions)
+import Error
+import Opts (ExecutionMode (..), Options (..), executionMode, parseOptions)
 import Parse (runLoxParser)
-import System.Console.Haskeline
-import Types (Env, LoxError)
+import VirtualMachine qualified as VM
 
-runRepl :: IO ()
-runRepl = evalStateT (runInputT settings repl) initialState
- where
-  initialState = globalEnv
-  settings =
-    defaultSettings
-      { historyFile = Just ".lox_history"
-      }
+runRepl :: Bool -> IO ()
+runRepl debug = do
+  initialState <- VM.initialState debug
+  runEff $ \io -> do
+    evalState initialState $ \state -> do
+      runInput io $ \input -> repl state input io
 
-repl :: (MonadState Env m, MonadIO m, MonadMask m) => InputT m ()
-repl = do
-  minput <- getInputLine "lox> "
+repl :: (e1 :> es, e2 :> es, e3 :> es) => State VM.VMState e1 -> Input e2 -> IOE e3 -> Eff es ()
+repl state input io = do
+  minput <- readInputLine input "lox> "
   case minput of
     Nothing -> return ()
     Just "exit" -> return ()
-    Just input -> do
-      res <- lift $ runExceptT (executeRepl (T.pack input))
+    Just program -> do
+      res <- try $ \exn -> executeProgram state exn io (T.pack program)
       case res of
-        Left e -> liftIO $ print e
+        Left e -> effIO io $ print e
         _ -> pure ()
-      repl
+      repl state input io
 
-executeRepl :: (MonadState Env m, MonadError LoxError m, MonadIO m) => T.Text -> m ()
-executeRepl input = either throwError pure (runLoxParser False "" input) >>= evalRepl_
+whenDebug :: (e1 :> es) => State VM.VMState e1 -> Eff es () -> Eff es ()
+whenDebug state e = gets state VM.debug >>= flip when e
 
-executeProgram :: (MonadState Env m, MonadError LoxError m, MonadIO m) => T.Text -> m ()
-executeProgram input = either throwError pure (runLoxParser True "" input) >>= evalProgram_
+compileWithDebug :: (e1 :> es, e2 :> es, e3 :> es) => State VM.VMState e1 -> Exception LoxError e2 -> IOE e3 -> AST.Program -> Eff es (Chunk.Function)
+compileWithDebug state exn io program =
+  let (res, logs) = compileTopLevel program
+   in do
+        func <- liftEither exn res
+        whenDebug state $ effIO io (putStrLn logs)
+        whenDebug state $ effIO io (disassembleChunk (Chunk.chunk func))
+        pure func
 
-regular :: FilePath -> IO ()
-regular file = do
+executeProgram :: (e1 :> es, e2 :> es, e3 :> es) => State VM.VMState e1 -> Exception LoxError e2 -> IOE e3 -> T.Text -> Eff es ()
+executeProgram state exn io input =
+  liftEither exn (runLoxParser "" input)
+    >>= compileWithDebug state exn io
+    >>= VM.runProgram state exn io
+
+regular :: Bool -> FilePath -> IO ()
+regular debug file = do
   t <- T.pack <$> readFile file
-  res <- runExceptT (evalStateT (executeProgram t) globalEnv)
+  initialState <- VM.initialState debug
+  res <- runEff $ \io ->
+    evalState initialState $ \state ->
+      try $ \exn ->
+        executeProgram state exn io t
   case res of
     Left e -> print e
     Right () -> pure ()
@@ -52,5 +69,5 @@ main :: IO ()
 main = do
   opts <- parseOptions
   case executionMode opts of
-    Repl -> runRepl
-    File file -> regular file
+    Repl -> runRepl (debug opts)
+    File file -> regular (debug opts) file

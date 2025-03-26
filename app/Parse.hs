@@ -1,78 +1,23 @@
 module Parse (
   runLoxParser,
+  expr_,
+  decl,
 )
 where
 
-import Control.Monad (void, when)
+import AST
+import Control.Monad (void)
 import Control.Monad.Combinators.Expr
-import Control.Monad.Identity (Identity)
-import Control.Monad.Reader (ReaderT, ask, runReaderT)
-import Control.Monad.State (StateT, evalStateT, gets, modify)
-import Data.Bool (bool)
-import Data.Map qualified as M
 import Data.Maybe (fromMaybe, isJust)
 import Data.Text qualified as T
 import Data.Void (Void)
+import Error
 import Text.Megaparsec
 import Text.Megaparsec.Char
 import Text.Megaparsec.Char.Lexer qualified as L
-import Types hiding (declare)
+import Types
 
-data InitState = Initialised | Uninitialised | Undeclared
-  deriving (Eq, Show)
-
-type FunScope = M.Map String InitState
-
-newtype ParseState = ParseState
-  { funScopes :: [FunScope]
-  }
-  deriving (Show)
-
-globals :: [String]
-globals = ["print", "clock"]
-
-initialState :: ParseState
-initialState = ParseState [M.empty]
-
-modifyScopes :: ([FunScope] -> [FunScope]) -> ParseState -> ParseState
-modifyScopes f state = state{funScopes = f (funScopes state)}
-
-modifyInnermostScope :: (FunScope -> FunScope) -> ParseState -> ParseState
-modifyInnermostScope f state = case funScopes state of
-  [] -> state
-  s : ss -> state{funScopes = f s : ss}
-
-newFun :: ParseState -> ParseState
-newFun = modifyScopes (M.empty :)
-
-endFun :: ParseState -> ParseState
-endFun = modifyScopes tail
-
-declare :: String -> ParseState -> ParseState
-declare name = modifyInnermostScope (M.insert name Uninitialised)
-
-initialise :: String -> ParseState -> ParseState
-initialise name = modifyInnermostScope (M.insert name Initialised)
-
-initState :: String -> ParseState -> InitState
-initState name state =
-  fromMaybe Undeclared $ funState <|> globalState
- where
-  funState = M.lookup name . head . funScopes $ state
-  globalState = if name `elem` globals then Just Initialised else Nothing
-
-assertInFunction :: Parser ()
-assertInFunction =
-  gets ((> 1) . length . funScopes)
-    >>= bool (fail "return statement must be in function") (pure ())
-
-type Parser = StateT ParseState (ReaderT Bool (Parsec Void T.Text))
-
-parseTest' :: (Show a) => Parser a -> String -> IO ()
-parseTest' p s = parseTest (runReaderT (evalStateT p initialState) False) (T.pack s)
-
-ifNeeded :: Parser () -> Parser ()
-ifNeeded p = ask >>= flip when p
+type Parser = (Parsec Void T.Text)
 
 withLocation :: Parser Expr_ -> Parser Expr
 withLocation p = Located <$> getSourcePos <*> p
@@ -106,19 +51,10 @@ literal =
 parens :: Parser a -> Parser a
 parens = between (symbol "(") (symbol ")")
 
-checkVarReference :: String -> Parser ()
-checkVarReference name = ifNeeded $ do
-  state <- gets (initState name)
-  case state of
-    Initialised -> pure ()
-    Uninitialised -> fail "can't reference variable in own initialiser"
-    Undeclared -> fail $ "var " ++ name ++ " has not been declared in this scope"
-
 assgn :: Parser Expr
 assgn = do
   loc <- getSourcePos
   lval <- ident
-  checkVarReference lval
   equality <- isJust <$> optional (lookAhead (symbol "=="))
   if equality
     then pure $ Located loc $ Ident lval
@@ -161,12 +97,12 @@ expr = makeExprParser callExpr operatorTable
 
 binary :: T.Text -> (Expr -> Expr -> Expr_) -> Operator Parser Expr
 binary name f = InfixL $ do
-  l <- getSourcePos <* keyword name
+  l <- getSourcePos <* symbol name
   return $ \e1 e2 -> Located l (f e1 e2)
 
 prefix :: T.Text -> (Expr -> Expr_) -> Operator Parser Expr
 prefix name f = Prefix $ do
-  l <- getSourcePos <* keyword name
+  l <- getSourcePos <* symbol name
   return $ \e -> Located l (f e)
 
 -- decreasing precedence
@@ -176,8 +112,7 @@ prefix name f = Prefix $ do
 -- where this arises, but i cbs rolling my own
 operatorTable :: [[Operator Parser Expr]]
 operatorTable =
-  [ [binary "." (BinOp Dot)]
-  ,
+  [
     [ prefix "-" (UnOp Negate)
     , prefix "!" (UnOp Not)
     ]
@@ -200,103 +135,83 @@ operatorTable =
     , binary "!=" (BinOp Neq)
     ]
   ,
-    [ binary "and" (BinOp And)
-    , binary "or" (BinOp Or)
+    [ binary "&&" (BinOp And)
+    , binary "||" (BinOp Or)
     ]
   ]
 
 terminal :: Parser ()
 terminal = void (symbol ";")
 
-checkUndeclared :: String -> Parser ()
-checkUndeclared name = ifNeeded $ do
-  state <- gets (initState name)
-  when (state /= Undeclared) $
-    fail $
-      "shadowing: variable "
-        ++ name
-        ++ " has already been declared in the current scope"
-
-assignStmt :: Parser Decl
-assignStmt = do
+assignDecl :: Parser Decl
+assignDecl = do
   void $ keyword "var"
   name <- ident
-  checkUndeclared name
-  modify (declare name)
   l <- getSourcePos
   e <- optional (symbol "=" *> expr)
-  modify (initialise name)
   void terminal
   return $ Bind name (fromMaybe (Located l (Value TNil)) e)
 
-scope_ :: Parser [Decl]
-scope_ = symbol "{" *> program <* symbol "}"
-
-scope :: Parser Decl
-scope = Scope <$> scope_
+scope :: Parser Stmt
+scope = Scope <$> (symbol "{" *> program <* symbol "}")
 
 condition :: Parser Expr
 condition = symbol "(" *> expr <* symbol ")"
 
-ifStmt :: Parser Decl
+ifStmt :: Parser Stmt
 ifStmt =
   If
     <$> (keyword "if" *> condition)
-    <*> scope_
-    <*> optional (keyword "else" *> scope_)
+    <*> stmt
+    <*> optional (keyword "else" *> stmt)
 
-whileStmt :: Parser Decl
+whileStmt :: Parser Stmt
 whileStmt =
   While
     <$> (keyword "while" *> condition)
-    <*> scope_
+    <*> stmt
 
-forStmt :: Parser Decl
+forStmt :: Parser Stmt
 forStmt = do
-  pre <- keyword "for" *> symbol "(" *> assignStmt
+  void $ keyword "for" *> symbol "("
+  pre <- assignDecl <|> (EvalStmt <$> exprStmt)
   cond <- expr
   post <- EvalExpr <$> (symbol ";" *> expr <* symbol ")")
-  prog <- scope_
-  pure (Scope [pre, While cond (prog ++ [post])])
+  prog <- stmt
+  pure (Scope [pre, EvalStmt $ While cond (Scope [EvalStmt prog, EvalStmt post])])
+
+-- returnStmt :: Parser Stmt
+-- returnStmt = Return <$> (keyword "return" *> expr <* symbol ";")
+
+exprStmt :: Parser Stmt
+exprStmt = EvalExpr <$> (expr <* symbol ";")
+
+stmt :: Parser Stmt
+stmt =
+  choice
+    [ scope
+    , ifStmt
+    , whileStmt
+    , forStmt
+    , -- , returnStmt
+      exprStmt
+    ]
 
 params :: Parser [String]
 params = commaSeparated ident
 
-funStmt :: Parser Fun
-funStmt = do
+funDecl :: Parser Decl
+funDecl = do
   name <- keyword "fun" *> ident <* symbol "("
   ps <- params <* symbol ")"
-  modify (initialise name)
-  modify newFun
-  mapM_ (modify . initialise) (name : ps)
-  body <- scope_
-  modify endFun
-  pure $ Fun name ps body
-
-classDecl :: Parser Decl
-classDecl = do
-  name <- keyword "Class" *> ident <* symbol "{"
-  modify newFun
-  modify (initialise name)
-  fs <- many funStmt
-  modify endFun
-  pure $ ClassDecl (Class name fs)
-
-returnStmt :: Parser Decl
-returnStmt = Return <$> (keyword "return" *> assertInFunction *> expr <* symbol ";")
+  Fun name ps <$> stmt
 
 decl :: Parser Decl
 decl =
   choice
-    [ assignStmt
-    , scope
-    , ifStmt
-    , whileStmt
-    , forStmt
-    , FunDecl <$> funStmt
-    , classDecl
-    , returnStmt
-    , EvalExpr <$> (expr <* symbol ";")
+    [ assignDecl
+    , funDecl
+    , EvalStmt <$> stmt
     ]
 
 program :: Parser [Decl]
@@ -306,5 +221,5 @@ mapLeft :: (a -> c) -> Either a b -> Either c b
 mapLeft f (Left a) = Left (f a)
 mapLeft _ (Right b) = Right b
 
-runLoxParser :: Bool -> String -> T.Text -> Either LoxError Program
-runLoxParser checks fname input = mapLeft syntaxError $ runParser (runReaderT (evalStateT program initialState) checks) fname input
+runLoxParser :: String -> T.Text -> Either LoxError Program
+runLoxParser fname input = mapLeft syntaxError $ runParser program fname input
